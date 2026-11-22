@@ -106,8 +106,8 @@ public static partial class DuaWidget {
     app.Run();
   }
 
-  // ================================================================ Steam game shelf
-  class SteamGame { public string AppId, Name, InstallDir; public long LastPlayed; public bool Installed; }
+  // ================================================================ Steam games (read by the game library in game-library.cs)
+  class SteamGame { public string AppId, Name, InstallDir, Lib; public long LastPlayed; public bool Installed; }
 
   static string SteamRoot() {
     string steam = null;
@@ -138,7 +138,7 @@ public static partial class DuaWidget {
       foreach (string f in Directory.GetFiles(apps, "appmanifest_*.acf")) {
         try {
           string t = File.ReadAllText(f);
-          var g = new SteamGame { AppId = AcfValue(t, "appid"), Name = AcfValue(t, "name"), InstallDir = AcfValue(t, "installdir") };
+          var g = new SteamGame { AppId = AcfValue(t, "appid"), Name = AcfValue(t, "name"), InstallDir = AcfValue(t, "installdir"), Lib = lib };
           long lp; long.TryParse(AcfValue(t, "LastPlayed"), out lp); g.LastPlayed = lp;
           int sf; int.TryParse(AcfValue(t, "StateFlags"), out sf); g.Installed = (sf & 4) != 0;
           string n = g.Name.ToLowerInvariant();
@@ -183,89 +183,6 @@ public static partial class DuaWidget {
     return null;
   }
 
-  static StackPanel shelfCovers;
-  static TextBlock shelfTitle;
-  static FrameworkElement shelfRoot;
-  static string shownShelf;
-
-  static UIElement BuildShelf() {
-    shelfTitle = new TextBlock { FontFamily = new FontFamily("Segoe UI"), FontSize = 15 * scale, Foreground = new SolidColorBrush(Color.FromArgb(160, 255, 255, 255)), FlowDirection = FlowDirection.RightToLeft, Margin = new Thickness(4 * scale, 0, 0, 8 * scale), HorizontalAlignment = HorizontalAlignment.Left };
-    shelfCovers = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Left };
-    var root = new StackPanel { VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Left, Visibility = Visibility.Collapsed };
-    root.Children.Add(shelfTitle); root.Children.Add(shelfCovers);
-    shelfRoot = root;
-    return root;
-  }
-
-  static UIElement Cover(SteamGame g, string image) {
-    double w = 70 * scale, h = 105 * scale;
-    var card = new Border { Width = w, Height = h, CornerRadius = new CornerRadius(8 * scale), Margin = new Thickness(0, 0, 9 * scale, 0), Cursor = Cursors.Hand,
-                            BorderThickness = new Thickness(1.5), BorderBrush = new SolidColorBrush(Color.FromArgb(40, 255, 255, 255)), ToolTip = g.Name,
-                            Background = new SolidColorBrush(Color.FromArgb(40, 255, 255, 255)) };
-    if (image != null) {
-      try {
-        var bmp = new BitmapImage();
-        bmp.BeginInit(); bmp.CacheOption = BitmapCacheOption.OnLoad; bmp.DecodePixelWidth = (int)(w * 2); bmp.UriSource = new Uri(image); bmp.EndInit(); bmp.Freeze();
-        card.Background = new ImageBrush(bmp) { Stretch = Stretch.UniformToFill };
-      } catch { }
-    }
-    if (card.Background is SolidColorBrush)                     // no cover: show the name instead
-      card.Child = new TextBlock { Text = g.Name, TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6 * scale), FontSize = 12 * scale, Foreground = Brushes.White };
-    var zoom = new ScaleTransform(1, 1);
-    card.RenderTransformOrigin = new Point(0.5, 1);
-    card.RenderTransform = zoom;
-    card.MouseEnter += delegate {
-      card.BorderBrush = new SolidColorBrush(Gold);
-      zoom.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.07, TimeSpan.FromMilliseconds(140)));
-      zoom.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.07, TimeSpan.FromMilliseconds(140)));
-    };
-    card.MouseLeave += delegate {
-      card.BorderBrush = new SolidColorBrush(Color.FromArgb(40, 255, 255, 255));
-      zoom.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1, TimeSpan.FromMilliseconds(140)));
-      zoom.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1, TimeSpan.FromMilliseconds(140)));
-    };
-    string id = g.AppId;
-    card.MouseLeftButtonUp += delegate {
-      try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("steam://rungameid/" + id) { UseShellExecute = true }); } catch { }
-    };
-    return card;
-  }
-
-  static bool shelfLoading;
-  static int shelfMax = 5;                                       // covers that fit left of the wallpaper's tasbih line (set in Main)
-
-  // Reads the library + covers off the UI thread, then shows the most recently played installed games.
-  static void RefreshShelf() {
-    if (shelfRoot == null || shelfLoading) return;
-    if (!CfgBool("game_shelf", true) || shelfMax < 1) { shelfRoot.Visibility = Visibility.Collapsed; return; }
-    shelfLoading = true;
-    var t = new System.Threading.Thread(delegate () {
-      List<SteamGame> top = new List<SteamGame>();
-      var covers = new Dictionary<string, string>();
-      try {
-        var games = ReadSteamGames();
-        lock (steamDirs) { steamDirs.Clear(); foreach (var g in games) if (g.InstallDir.Length > 0) steamDirs[g.InstallDir.ToLowerInvariant()] = g.Name; }
-        top = games.Where(g => g.Installed).OrderByDescending(g => g.LastPlayed).ThenBy(g => g.Name).Take(shelfMax).ToList();
-        foreach (var g in top) covers[g.AppId] = CoverFor(g);
-      } catch { }
-      Application.Current.Dispatcher.BeginInvoke(new Action(delegate {
-        try {
-          string sig = string.Join("|", top.Select(g => g.AppId + ":" + (covers[g.AppId] != null)).ToArray()) + "#" + PlayTitle();
-          if (sig != shownShelf) {
-            shownShelf = sig;
-            shelfCovers.Children.Clear();
-            foreach (var g in top) shelfCovers.Children.Add(Cover(g, covers[g.AppId]));
-            shelfTitle.Text = PlayTitle();
-          }
-          shelfRoot.Visibility = top.Count > 0 || PlaySecondsToday() > 0 ? Visibility.Visible : Visibility.Collapsed;
-        } catch { }
-        shelfLoading = false;
-      }));
-    });
-    t.IsBackground = true;
-    t.Start();
-  }
-
   // ================================================================ play time
   [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool QueryFullProcessImageName(IntPtr h, int flags, StringBuilder name, ref int size);
@@ -299,6 +216,7 @@ public static partial class DuaWidget {
         lock (steamDirs) { if (!steamDirs.TryGetValue(folder.ToLowerInvariant(), out name)) name = folder; }
         return name;
       }
+      lock (gameDirs) foreach (var d in gameDirs) if (path.StartsWith(d.Key, StringComparison.OrdinalIgnoreCase)) return d.Value;   // Epic / added by hand
     }
     int st;
     if (SHQueryUserNotificationState(out st) == 0 && st == 3 && path != null)   // fullscreen Direct3D app outside Steam
@@ -358,11 +276,4 @@ public static partial class DuaWidget {
     return Digits((m / 60) + ":" + (m % 60).ToString("00"));
   }
 
-  static string PlayTitle() {
-    int today = PlaySecondsToday(), week = PlayThisWeek().Values.Sum();
-    string t = "آخر ألعابك";
-    if (today >= 60) t += "   •   لعبت اليوم " + Duration(today);
-    if (week >= 60) t += "   •   هالأسبوع " + Duration(week);
-    return t;
-  }
 }

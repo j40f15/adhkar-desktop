@@ -172,9 +172,6 @@ public static partial class DuaWidget {
     double workBottom = SystemParameters.WorkArea.Bottom / scale;         // top edge of the taskbar
     MakeLayer(vw / 2 - 450, workBottom - 44, 900, 40, batteryPanel);
 
-    // game shelf, bottom-left (clickable: a cover starts the game); as many covers as fit before the tasbih line (centred on cx, ~450 wide)
-    shelfMax = Math.Max(0, Math.Min(5, (int)((cx - 230 - 34 - 30) / 79)));
-    MakeLayer(34, workBottom - 200, 79 * 5 + 20, 190, BuildShelf(), false);
 
     UpdateClock(true);
     NextDua(true);
@@ -200,10 +197,9 @@ public static partial class DuaWidget {
     deviceChangeTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };   // something was plugged in / out
     deviceChangeTimer.Tick += delegate { deviceChangeTimer.Stop(); ReadBatteriesAsync(); };
 
-    RefreshShelf();
-    var shelfTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(2) };          // new game played / installed
-    shelfTimer.Tick += delegate { if (!Busy()) RefreshShelf(); };
-    shelfTimer.Start();
+    // game library window: Ctrl+Alt+G or the tray icon (the list is also used to name games for the play-time count)
+    LoadLibraryAsync();
+    RegisterLibraryHotkey();
 
     app.Run();
     if (tray != null) { tray.Visible = false; tray.Dispose(); }
@@ -599,6 +595,10 @@ public static partial class DuaWidget {
     var settingsItem = new System.Windows.Forms.ToolStripMenuItem("الإعدادات...", null, delegate { OpenSettings(); });
     settingsItem.Font = new System.Drawing.Font("Segoe UI", 10.5f, System.Drawing.FontStyle.Bold);
     menu.Items.Add(settingsItem);
+    var libraryItem = new System.Windows.Forms.ToolStripMenuItem("مكتبة الألعاب", null, delegate { OpenLibrary(); });
+    libraryItem.Font = new System.Drawing.Font("Segoe UI", 10.5f, System.Drawing.FontStyle.Bold);
+    libraryItem.ShortcutKeyDisplayString = "Ctrl+Alt+G";
+    menu.Items.Add(libraryItem);
     menu.Items.Add(new System.Windows.Forms.ToolStripMenuItem("شاشة الراحة الحين", null, delegate {
       try { System.Diagnostics.Process.Start(Path.Combine(dir, "adhkar-rest.scr"), "/s"); } catch { }
     }));

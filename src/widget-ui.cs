@@ -312,8 +312,6 @@ public static partial class DuaWidget {
     root.Children.Add(Heading("الألعاب"));
     var overlay = Check("تنبيه فوق اللعبة (وقت الصلاة، الشحن، الحرارة)", CfgBool("game_overlay", true));
     root.Children.Add(overlay);
-    var shelf = Check("رف الألعاب على سطح المكتب (آخر ألعابك في ستيم)", CfgBool("game_shelf", true));
-    root.Children.Add(shelf);
 
     // batteries
     root.Children.Add(Heading("شحن الأجهزة"));
@@ -346,7 +344,6 @@ public static partial class DuaWidget {
       foreach (var r in themeRadios) if (r.IsChecked == true) SetCfg("theme", (string)r.Tag);
       SetCfg("second_screen", second.IsChecked == true);
       SetCfg("game_overlay", overlay.IsChecked == true);
-      SetCfg("game_shelf", shelf.IsChecked == true);
       SetCfg("rest_minutes", restVals[Math.Max(0, rest.SelectedIndex)]);
       SetCfg("battery_low", lowVals[Math.Max(0, low.SelectedIndex)]);
       SetCfg("battery_full_alert", full.IsChecked == true);

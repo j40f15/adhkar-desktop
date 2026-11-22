@@ -57,7 +57,7 @@ $city = [string]$combo.SelectedItem
 
 # copy the tool (keep a friend's own duas if they are reinstalling)
 New-Item -ItemType Directory -Force $dest | Out-Null
-foreach ($f in 'adhkar.ps1', 'dua-widget.cs', 'widget-ui.cs', 'widget-extras.cs', 'hidio.cs', 'batteries.cs', 'uninstall.cmd') { Copy-Item -LiteralPath (Join-Path $src $f) -Destination $dest -Force }
+foreach ($f in 'adhkar.ps1', 'dua-widget.cs', 'widget-ui.cs', 'widget-extras.cs', 'game-library.cs', 'hidio.cs', 'batteries.cs', 'uninstall.cmd') { Copy-Item -LiteralPath (Join-Path $src $f) -Destination $dest -Force }
 if (-not (Test-Path (Join-Path $dest 'adhkar.txt'))) { Copy-Item -LiteralPath (Join-Path $src 'adhkar.txt') -Destination $dest }
 Get-ChildItem -LiteralPath $dest -File | Unblock-File
 Set-Content -LiteralPath (Join-Path $dest 'city.txt') -Value "$city|$($cities[$city])" -Encoding UTF8

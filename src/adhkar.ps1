@@ -45,7 +45,7 @@ $Weather              = $true   # hourly Makkah weather from open-meteo.com (sen
 $DuaSeconds           = 30      # how often the dua on the desktop changes (adhkar-dua.exe); run -Mode Setup after changing
 $TaskWidget           = 'Adhkar - Dua Widget'
 $AppName              = 'حِصن'  # the program's name (notifications, right-click menu)
-$Version              = '2.2'   # shown in the settings / used by the auto-update
+$Version              = '2.3'   # shown in the settings / used by the auto-update
 
 # settings.ini (written by the settings window in adhkar-dua.exe) overrides the defaults above
 $Settings = @{}
@@ -728,7 +728,7 @@ public static class AdhkarRun {
   Start-Sleep -Milliseconds 500
   Add-Type -AssemblyName System.Xaml, System.Windows.Forms, System.Drawing
   # an install updated by an older version may lack a newer source file: fetch it from the project's src folder
-  $sources = 'dua-widget.cs', 'widget-ui.cs', 'widget-extras.cs', 'hidio.cs', 'batteries.cs'
+  $sources = 'dua-widget.cs', 'widget-ui.cs', 'widget-extras.cs', 'game-library.cs', 'hidio.cs', 'batteries.cs'
   foreach ($f in $sources) {
     $p = Join-Path $Root $f
     if ((Test-Path $p) -or -not $Settings['update_url']) { continue }
