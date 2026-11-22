@@ -200,6 +200,7 @@ public static partial class DuaWidget {
     // game library window: Ctrl+Alt+G or the tray icon (the list is also used to name games for the play-time count)
     LoadLibraryAsync();
     RegisterLibraryHotkey();
+    StartSteamArabic();                                         // Arabic inside Steam (only when turned on in the settings)
 
     app.Run();
     if (tray != null) { tray.Visible = false; tray.Dispose(); }

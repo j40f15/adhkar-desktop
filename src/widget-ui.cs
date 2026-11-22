@@ -332,6 +332,8 @@ public static partial class DuaWidget {
     root.Children.Add(blockGame); root.Children.Add(blockCode);
     var translate = Check("عرّب الجوائز وشرح الألعاب في المكتبة (ترجمة آلية)", CfgBool("translate_ar", true));
     root.Children.Add(translate);
+    var steamAr = Check("عرّب ستيم من داخله: التحديثات والجوائز والشرح (يشتغل بعد ما تقفل ستيم وتفتحه)", CfgBool("steam_arabic", false));
+    root.Children.Add(steamAr);
     w.PreviewKeyDown += (s, e) => {
       if (!hkRecording) return;
       e.Handled = true;
@@ -386,6 +388,7 @@ public static partial class DuaWidget {
       SetCfg("library_block_game", blockGame.IsChecked == true);
       SetCfg("library_block_coding", blockCode.IsChecked == true);
       SetCfg("translate_ar", translate.IsChecked == true);
+      SetCfg("steam_arabic", steamAr.IsChecked == true);
       SetCfg("rest_minutes", restVals[Math.Max(0, rest.SelectedIndex)]);
       SetCfg("battery_low", lowVals[Math.Max(0, low.SelectedIndex)]);
       SetCfg("battery_full_alert", full.IsChecked == true);

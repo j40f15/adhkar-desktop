@@ -45,7 +45,7 @@ $Weather              = $true   # hourly Makkah weather from open-meteo.com (sen
 $DuaSeconds           = 30      # how often the dua on the desktop changes (adhkar-dua.exe); run -Mode Setup after changing
 $TaskWidget           = 'Adhkar - Dua Widget'
 $AppName              = 'حِصن'  # the program's name (notifications, right-click menu)
-$Version              = '2.5'   # shown in the settings / used by the auto-update
+$Version              = '2.6'   # shown in the settings / used by the auto-update
 
 # settings.ini (written by the settings window in adhkar-dua.exe) overrides the defaults above
 $Settings = @{}
@@ -296,6 +296,23 @@ function Initialize-Native {
   }
 }
 
+# "عرّب ستيم من داخله" (settings.ini steam_arabic): Steam's start-up entry and Start-menu shortcut get
+# -language arabic -cef-enable-debugging, so adhkar-dua.exe can put Arabic into Steam's pages. Off = both flags removed.
+function Set-SteamArabic {
+  $on = Get-SettingBool 'steam_arabic' $false
+  $fix = { param([string]$s) $s = (($s -replace '\s*-language\s+\w+', '') -replace '\s*-cef-enable-debugging', '').Trim()
+           if ($on) { ($s + ' -language arabic -cef-enable-debugging').Trim() } else { $s } }
+  $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+  $v = (Get-ItemProperty -LiteralPath $run -ErrorAction SilentlyContinue).Steam
+  if ($v) { $n = & $fix $v; if ($n -ne $v) { Set-ItemProperty -LiteralPath $run -Name Steam -Value $n; Write-Log "steam start-up: $n" } }
+  $lnk = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Steam\Steam.lnk'
+  if (Test-Path -LiteralPath $lnk) {
+    $l = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+    $n = & $fix $l.Arguments
+    if ($n -ne $l.Arguments) { $l.Arguments = $n; $l.Save() }
+  }
+}
+
 function Set-Wallpaper([string]$Path) {
   Initialize-Native
   Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name WallpaperStyle -Value '10'
@@ -512,6 +529,7 @@ function Invoke-Refresh {
   Write-PrayerFile $now
   Update-Weather
   try { Set-RestScreen } catch { Write-Log ('rest screen: ' + $_.Exception.Message) }
+  try { Set-SteamArabic } catch { Write-Log ('steam arabic: ' + $_.Exception.Message) }
   Invoke-UpdateCheck
   Get-ChildItem -LiteralPath $Root -Filter 'wallpaper-*.png' | Where-Object { $_.FullName -ne $png } | Remove-Item -Force -ErrorAction SilentlyContinue
   Update-AlertTriggers $now
@@ -728,7 +746,7 @@ public static class AdhkarRun {
   Start-Sleep -Milliseconds 500
   Add-Type -AssemblyName System.Xaml, System.Windows.Forms, System.Drawing, System.Web.Extensions
   # an install updated by an older version may lack a newer source file: fetch it from the project's src folder
-  $sources = 'dua-widget.cs', 'widget-ui.cs', 'widget-extras.cs', 'game-library.cs', 'hidio.cs', 'batteries.cs'
+  $sources = 'dua-widget.cs', 'widget-ui.cs', 'widget-extras.cs', 'game-library.cs', 'steam-arabic.cs', 'hidio.cs', 'batteries.cs'
   foreach ($f in $sources) {
     $p = Join-Path $Root $f
     if ((Test-Path $p) -or -not $Settings['update_url']) { continue }
@@ -762,6 +780,7 @@ function Uninstall-Adhkar {
   Unregister-ScheduledTask -TaskName $TaskAlert -Confirm:$false -ErrorAction SilentlyContinue
   Remove-Item "HKCU:\Software\Classes\AppUserModelId\$AppId" -Recurse -Force -ErrorAction SilentlyContinue
   $Settings['rest_minutes'] = '0'; try { Set-RestScreen } catch {}            # remove our screensaver
+  $Settings['steam_arabic'] = '0'; try { Set-SteamArabic } catch {}           # and our Steam start-up flags
   $default = Join-Path $env:WINDIR 'Web\Wallpaper\Windows\img0.jpg'          # back to the normal Windows wallpaper
   if (Test-Path $default) { Set-Wallpaper $default }
 }
