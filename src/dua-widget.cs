@@ -61,6 +61,7 @@ public static partial class DuaWidget {
 
   static readonly CultureInfo Ar = CultureInfo.GetCultureInfo("ar-SA");
   static readonly Random Rng = new Random();
+  const string AppName = "حِصن";                                 // the program's name (tray, settings, windows)
   static readonly string[] Days = { "الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت" };
   static readonly string[] Months = { "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر" };
   static Color Gold = Color.FromArgb(210, 212, 175, 106);        // accent colour, replaced by the chosen theme at start
@@ -254,7 +255,7 @@ public static partial class DuaWidget {
     win.ShowActivated = false;
     win.Focusable = false;
     win.ResizeMode = ResizeMode.NoResize;
-    win.Title = "Adhkar";
+    win.Title = "Hisn";
     win.Left = x * scale; win.Top = y * scale; win.Width = w * scale; win.Height = h * scale;
     var grid = new Grid();
     grid.Children.Add(content);
@@ -323,7 +324,7 @@ public static partial class DuaWidget {
       shownCount = count;
       countText.Text = count ?? "";
     }
-    string tip = count ?? "أذكار وحماية الجهاز";
+    string tip = count ?? AppName;
     if (tray != null && tip != shownTip) { shownTip = tip; tray.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip; }
     string info = string.Join("   •   ", new[] { Weather(now), HijriCountdown(now.Date) }.Where(s => !string.IsNullOrEmpty(s)).ToArray());
     if (info != shownInfo) { shownInfo = info; foreach (var t in infoTexts) t.Text = info; }
@@ -676,7 +677,7 @@ public static partial class DuaWidget {
 
     tray = new System.Windows.Forms.NotifyIcon();
     tray.Icon = TrayIcon();
-    tray.Text = "أذكار وحماية الجهاز";
+    tray.Text = AppName;
     tray.ContextMenuStrip = menu;
     tray.MouseUp += (s, e) => {                                // left click opens the same menu
       if (e.Button != System.Windows.Forms.MouseButtons.Left) return;

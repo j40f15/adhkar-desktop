@@ -44,7 +44,8 @@ $SleepReminder        = $true   # 11 PM - sleep adhkar and Surat al-Mulk
 $Weather              = $true   # hourly Makkah weather from open-meteo.com (sends only Makkah's coordinates)
 $DuaSeconds           = 30      # how often the dua on the desktop changes (adhkar-dua.exe); run -Mode Setup after changing
 $TaskWidget           = 'Adhkar - Dua Widget'
-$Version              = '2.1'   # shown in the settings / used by the auto-update
+$AppName              = 'حِصن'  # the program's name (notifications, right-click menu)
+$Version              = '2.2'   # shown in the settings / used by the auto-update
 
 # settings.ini (written by the settings window in adhkar-dua.exe) overrides the defaults above
 $Settings = @{}
@@ -495,7 +496,7 @@ function Invoke-UpdateCheck {
     # rebuild once this refresh (and the launcher running it) has finished
     Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command',
       "Start-Sleep -Seconds 8; & '$(Join-Path $Root 'adhkar.ps1')' -Mode Setup"
-    Show-Toast "تم تحديث البرنامج للنسخة $remote" @('فيه ميزات جديدة، الأداة بتعيد تشغيل نفسها خلال ثواني') -App $HelperAppId -IconFile 'shield.png'
+    Show-Toast "تم تحديث $AppName للنسخة $remote" @('فيه ميزات جديدة، الأداة بتعيد تشغيل نفسها خلال ثواني') -App $HelperAppId -IconFile 'shield.png'
     Write-Log "updated to $remote"
   } catch { Write-Log ('update check failed: ' + $_.Exception.Message) }
 }
@@ -542,21 +543,16 @@ function Invoke-Alert {
 function Initialize-Registration {
   $icon = Join-Path $Root 'icon.png'
   if (-not (Test-Path $icon)) { New-Icon $icon }
-  $k = "HKCU:\Software\Classes\AppUserModelId\$AppId"
-  if (-not (Test-Path $k)) {
-    New-Item -Path $k -Force | Out-Null
-    New-ItemProperty -Path $k -Name DisplayName -Value 'مواقيت الصلاة' -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path $k -Name IconUri -Value $icon -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path $k -Name ShowInSettings -Value 1 -PropertyType DWord -Force | Out-Null
-  }
   $shield = Join-Path $Root 'shield.png'
   if (-not (Test-Path $shield)) { New-ShieldIcon $shield }
-  $k2 = "HKCU:\Software\Classes\AppUserModelId\$HelperAppId"
-  if (-not (Test-Path $k2)) {
-    New-Item -Path $k2 -Force | Out-Null
-    New-ItemProperty -Path $k2 -Name DisplayName -Value 'حماية الجهاز' -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path $k2 -Name IconUri -Value $shield -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path $k2 -Name ShowInSettings -Value 1 -PropertyType DWord -Force | Out-Null
+  # the sender names shown on every notification (rewritten each time, so a rename reaches old installs too)
+  foreach ($a in @(@($AppId, $AppName, $icon), @($HelperAppId, "$AppName · حماية الجهاز", $shield))) {
+    $k = "HKCU:\Software\Classes\AppUserModelId\$($a[0])"
+    if (-not (Test-Path $k)) { New-Item -Path $k -Force | Out-Null }
+    $cur = Get-ItemProperty -LiteralPath $k -ErrorAction SilentlyContinue
+    if ($cur.DisplayName -ne $a[1]) { New-ItemProperty -Path $k -Name DisplayName -Value $a[1] -PropertyType String -Force | Out-Null }
+    if ($cur.IconUri -ne $a[2]) { New-ItemProperty -Path $k -Name IconUri -Value $a[2] -PropertyType String -Force | Out-Null }
+    if ($cur.ShowInSettings -ne 1) { New-ItemProperty -Path $k -Name ShowInSettings -Value 1 -PropertyType DWord -Force | Out-Null }
   }
 
   # keep the widget's control-panel icon visible next to the taskbar clock (not hidden under ^)
@@ -569,11 +565,11 @@ function Initialize-Registration {
   # adhkar-kill:<token> protocol = the "اقفله الحين" button on frozen-app alerts (adhkar-dua.exe checks the one-time token)
   $pk = $cu.CreateSubKey('Software\Classes\adhkar-kill'); $pk.SetValue('', 'URL:Adhkar kill'); $pk.SetValue('URL Protocol', ''); $pk.Close()
   $pc = $cu.CreateSubKey('Software\Classes\adhkar-kill\shell\open\command'); $pc.SetValue('', "`"$(Join-Path $Root 'adhkar-dua.exe')`" `"%1`""); $pc.Close()
-  # right-click > "فحص الملف (حماية الجهاز)" on any file or folder
+  # right-click > "فحص الملف (حِصن)" on any file or folder
   $ico = Join-Path $Root 'shield.ico'
   if (-not (Test-Path $ico)) { ConvertTo-Ico $shield $ico }
   foreach ($base in 'Software\Classes\*\shell\AdhkarScan', 'Software\Classes\Directory\shell\AdhkarScan') {
-    $v = $cu.CreateSubKey($base); $v.SetValue('', 'فحص الملف (حماية الجهاز)'); $v.SetValue('Icon', $ico); $v.Close()
+    $v = $cu.CreateSubKey($base); $v.SetValue('', "فحص الملف ($AppName)"); $v.SetValue('Icon', $ico); $v.Close()
     $c = $cu.CreateSubKey("$base\command"); $c.SetValue('', "`"$(Join-Path $Root 'adhkar-run.exe')`" ScanFile `"%1`""); $c.Close()
   }
   # right-click > "جرّبه بأمان (صندوق معزول)" = open a copy inside Windows Sandbox with no internet

@@ -1,4 +1,4 @@
-﻿# Installer for "أذكار وحماية الجهاز": pick your city, then everything installs for the current Windows user
+﻿# Installer for "حِصن" (Hisn): pick your city, then everything installs for the current Windows user
 # into %USERPROFILE%\Adhkar. No admin rights needed. Remove it any time with uninstall.cmd.
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -17,7 +17,8 @@ $cities = [ordered]@{
 
 $font = New-Object System.Drawing.Font('Segoe UI', 11)
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'تثبيت أذكار وحماية الجهاز'
+$AppName = 'حِصن'
+$form.Text = "تثبيت $AppName"
 $form.RightToLeft = 'Yes'; $form.RightToLeftLayout = $true
 $form.ClientSize = New-Object System.Drawing.Size(440, 250)
 $form.StartPosition = 'CenterScreen'; $form.FormBorderStyle = 'FixedDialog'; $form.MaximizeBox = $false; $form.MinimizeBox = $false
@@ -25,7 +26,7 @@ $form.Font = $font
 $form.BackColor = [System.Drawing.Color]::FromArgb(18, 18, 18); $form.ForeColor = [System.Drawing.Color]::FromArgb(235, 235, 235)
 
 $title = New-Object System.Windows.Forms.Label
-$title.Text = 'أذكار وحماية الجهاز'; $title.Font = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Bold)
+$title.Text = $AppName; $title.Font = New-Object System.Drawing.Font('Segoe UI', 18, [System.Drawing.FontStyle]::Bold)
 $title.ForeColor = [System.Drawing.Color]::FromArgb(212, 175, 106); $title.AutoSize = $true; $title.Location = New-Object System.Drawing.Point(20, 16)
 
 $about = New-Object System.Windows.Forms.Label
@@ -67,7 +68,7 @@ $lines += 'update_url=https://raw.githubusercontent.com/j40f15/adhkar-desktop/ma
 Set-Content -LiteralPath $ini -Value $lines -Encoding UTF8
 
 $wait = New-Object System.Windows.Forms.Form
-$wait.Text = 'أذكار وحماية الجهاز'; $wait.RightToLeft = 'Yes'; $wait.RightToLeftLayout = $true; $wait.StartPosition = 'CenterScreen'
+$wait.Text = $AppName; $wait.RightToLeft = 'Yes'; $wait.RightToLeftLayout = $true; $wait.StartPosition = 'CenterScreen'
 $wait.ClientSize = New-Object System.Drawing.Size(360, 90); $wait.FormBorderStyle = 'FixedDialog'; $wait.ControlBox = $false; $wait.Font = $font
 $wait.BackColor = $form.BackColor; $wait.ForeColor = $form.ForeColor
 $wl = New-Object System.Windows.Forms.Label; $wl.Text = 'جاري التثبيت... (أقل من دقيقة)'; $wl.AutoSize = $true; $wl.Location = New-Object System.Drawing.Point(20, 32)
@@ -77,11 +78,11 @@ $p = Start-Process powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy'
 $wait.Close()
 
 if ($p.ExitCode -eq 0) {
-  [System.Windows.Forms.MessageBox]::Show("تم التثبيت ✅`n`nمدينتك: $city`nأيقونة الهلال جنب ساعة شريط المهام فيها كل الإعدادات.`nوللإزالة: شغّل uninstall.cmd", 'أذكار وحماية الجهاز',
+  [System.Windows.Forms.MessageBox]::Show("تم التثبيت ✅`n`nمدينتك: $city`nأيقونة الهلال جنب ساعة شريط المهام فيها كل الإعدادات.`nوللإزالة: شغّل uninstall.cmd", $AppName,
     [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information,
     [System.Windows.Forms.MessageBoxDefaultButton]::Button1, [System.Windows.Forms.MessageBoxOptions]::RtlReading) | Out-Null
 } else {
-  [System.Windows.Forms.MessageBox]::Show("صار خطأ أثناء التثبيت. شوف الملف:`n$dest\log.txt", 'أذكار وحماية الجهاز',
+  [System.Windows.Forms.MessageBox]::Show("صار خطأ أثناء التثبيت. شوف الملف:`n$dest\log.txt", $AppName,
     [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error,
     [System.Windows.Forms.MessageBoxDefaultButton]::Button1, [System.Windows.Forms.MessageBoxOptions]::RtlReading) | Out-Null
 }

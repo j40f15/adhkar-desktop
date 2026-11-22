@@ -107,7 +107,7 @@ public static partial class DuaWidget {
       var w = new Window();
       w.WindowStyle = WindowStyle.None; w.AllowsTransparency = true; w.Background = Brushes.Transparent;
       w.ShowInTaskbar = false; w.ShowActivated = false; w.Topmost = true; w.Focusable = false;
-      w.ResizeMode = ResizeMode.NoResize; w.SizeToContent = SizeToContent.WidthAndHeight; w.Title = "Adhkar";
+      w.ResizeMode = ResizeMode.NoResize; w.SizeToContent = SizeToContent.WidthAndHeight; w.Title = "Hisn";
       var panel = new StackPanel { FlowDirection = FlowDirection.RightToLeft };
       panel.Children.Add(new TextBlock { Text = title, FontFamily = new FontFamily("Segoe UI"), FontWeight = FontWeights.SemiBold, FontSize = 22 * scale, Foreground = new SolidColorBrush(Gold), TextAlignment = TextAlignment.Center });
       if (!string.IsNullOrEmpty(line))
@@ -251,12 +251,12 @@ public static partial class DuaWidget {
     if (settingsWin != null) { settingsWin.Activate(); return; }
     LoadCfg();
     var w = new Window {
-      Title = "إعدادات أذكار وحماية الجهاز", Width = 540, Height = 760, WindowStartupLocation = WindowStartupLocation.CenterScreen,
+      Title = "إعدادات " + AppName, Width = 540, Height = 760, WindowStartupLocation = WindowStartupLocation.CenterScreen,
       FlowDirection = FlowDirection.RightToLeft, Background = new SolidColorBrush(Color.FromRgb(18, 18, 18)), ResizeMode = ResizeMode.CanMinimize,
       FontFamily = new FontFamily("Segoe UI"), FontSize = 14, Foreground = Brushes.White
     };
     var root = new StackPanel { Margin = new Thickness(26, 18, 26, 18) };
-    root.Children.Add(new TextBlock { Text = "الإعدادات", FontSize = 26, FontWeight = FontWeights.SemiBold, Foreground = new SolidColorBrush(Gold) });
+    root.Children.Add(new TextBlock { Text = AppName + "  ·  الإعدادات", FontSize = 26, FontWeight = FontWeights.SemiBold, Foreground = new SolidColorBrush(Gold) });
     root.Children.Add(new TextBlock { Text = "أي تغيير ينطبق أول ما تضغط «حفظ»", Foreground = new SolidColorBrush(Color.FromRgb(150, 150, 150)), Margin = new Thickness(0, 2, 0, 0) });
 
     // prayer times

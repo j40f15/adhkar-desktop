@@ -42,7 +42,7 @@ public static partial class DuaWidget {
     foreach (var scr in System.Windows.Forms.Screen.AllScreens) {
       var w = new Window {
         WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize, Topmost = true, ShowInTaskbar = false,
-        Background = Brushes.Black, Cursor = Cursors.None, Title = "Adhkar",
+        Background = Brushes.Black, Cursor = Cursors.None, Title = "Hisn",
         Left = scr.Bounds.X * dipPerPx, Top = scr.Bounds.Y * dipPerPx, Width = scr.Bounds.Width * dipPerPx, Height = scr.Bounds.Height * dipPerPx
       };
       w.KeyDown += delegate { quit(); };
