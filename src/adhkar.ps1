@@ -44,7 +44,7 @@ $SleepReminder        = $true   # 11 PM - sleep adhkar and Surat al-Mulk
 $Weather              = $true   # hourly Makkah weather from open-meteo.com (sends only Makkah's coordinates)
 $DuaSeconds           = 30      # how often the dua on the desktop changes (adhkar-dua.exe); run -Mode Setup after changing
 $TaskWidget           = 'Adhkar - Dua Widget'
-$Version              = '2.0'   # shown in the settings / used by the auto-update
+$Version              = '2.1'   # shown in the settings / used by the auto-update
 
 # settings.ini (written by the settings window in adhkar-dua.exe) overrides the defaults above
 $Settings = @{}
@@ -289,13 +289,42 @@ function New-Wallpaper($Times, [string]$NextKey, [datetime]$Date, [bool]$IsTomor
   Save-Png $dv $W $H $OutFile
 }
 
-function Set-Wallpaper([string]$Path) {
+function Initialize-Native {
   if (-not ('AdhkarNative' -as [type])) {
     Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public static class AdhkarNative { [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni); }'
   }
+}
+
+function Set-Wallpaper([string]$Path) {
+  Initialize-Native
   Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name WallpaperStyle -Value '10'
   Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name TileWallpaper -Value '0'
   [void][AdhkarNative]::SystemParametersInfo(0x0014, 0, $Path, 0x03)
+}
+
+# Rest screen = Windows screensaver adhkar-rest.scr (a copy of adhkar-dua.exe). settings.ini rest_minutes: 0 = off.
+# Windows never starts it while a game or video keeps the screen awake. The lock-on-resume option is left as the user set it.
+function Set-RestScreen {
+  $scr = Join-Path $Root 'adhkar-rest.scr'
+  $min = [Math]::Max(0, [Math]::Min(120, (Get-SettingInt 'rest_minutes' 10)))
+  $k = 'HKCU:\Control Panel\Desktop'
+  Initialize-Native
+  $cur = "$((Get-ItemProperty -LiteralPath $k -ErrorAction SilentlyContinue).'SCRNSAVE.EXE')"
+  if ($min -gt 0 -and (Test-Path $scr)) {
+    $short = (New-Object -ComObject Scripting.FileSystemObject).GetFile($scr).ShortPath   # Windows wants a path without spaces here
+    $old = (Get-ItemProperty -LiteralPath $k -ErrorAction SilentlyContinue).ScreenSaveTimeOut
+    if ($cur -eq $short -and "$old" -eq "$($min * 60)") { return }
+    Set-ItemProperty -LiteralPath $k -Name 'SCRNSAVE.EXE' -Value $short
+    Set-ItemProperty -LiteralPath $k -Name ScreenSaveActive -Value '1'
+    Set-ItemProperty -LiteralPath $k -Name ScreenSaveTimeOut -Value "$($min * 60)"
+    [void][AdhkarNative]::SystemParametersInfo(0x000F, $min * 60, $null, 0x03)   # SPI_SETSCREENSAVETIMEOUT
+    [void][AdhkarNative]::SystemParametersInfo(0x0011, 1, $null, 0x03)           # SPI_SETSCREENSAVEACTIVE
+    Write-Log "rest screen: after $min min"
+  } elseif ($cur -like '*adhkar-rest.scr' -or $cur -like '*ADHKAR~*.SCR') {      # turned off: remove ours, never someone else's
+    Remove-ItemProperty -LiteralPath $k -Name 'SCRNSAVE.EXE' -ErrorAction SilentlyContinue
+    [void][AdhkarNative]::SystemParametersInfo(0x0011, 0, $null, 0x03)
+    Write-Log 'rest screen: off'
+  }
 }
 
 # ---------------------------------------------------------------- notifications
@@ -459,10 +488,9 @@ function Invoke-UpdateCheck {
     if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne $sha) { Write-Log 'update: checksum mismatch, not installed'; return }
     Expand-Archive -LiteralPath $zip -DestinationPath $tmp -Force
     $src = Get-ChildItem -LiteralPath $tmp -Directory | Select-Object -First 1
-    foreach ($f in 'adhkar.ps1', 'dua-widget.cs', 'widget-ui.cs', 'hidio.cs', 'batteries.cs', 'uninstall.cmd') {
-      $p = Join-Path $src.FullName $f
-      if (Test-Path $p) { Copy-Item -LiteralPath $p -Destination $Root -Force; Unblock-File -LiteralPath (Join-Path $Root $f) }
-    }
+    # every source file in the package (so new files arrive too); adhkar.txt stays, it may hold your own duas
+    $files = @(Get-ChildItem -LiteralPath $src.FullName -File | Where-Object { $_.Extension -eq '.cs' -or $_.Name -in 'adhkar.ps1', 'uninstall.cmd' })
+    foreach ($f in $files) { Copy-Item -LiteralPath $f.FullName -Destination $Root -Force; Unblock-File -LiteralPath (Join-Path $Root $f.Name) }
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     # rebuild once this refresh (and the launcher running it) has finished
     Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command',
@@ -482,6 +510,7 @@ function Invoke-Refresh {
   Set-LockScreenImage $png
   Write-PrayerFile $now
   Update-Weather
+  try { Set-RestScreen } catch { Write-Log ('rest screen: ' + $_.Exception.Message) }
   Invoke-UpdateCheck
   Get-ChildItem -LiteralPath $Root -Filter 'wallpaper-*.png' | Where-Object { $_.FullName -ne $png } | Remove-Item -Force -ErrorAction SilentlyContinue
   Update-AlertTriggers $now
@@ -702,11 +731,25 @@ public static class AdhkarRun {
   Get-Process -Name 'adhkar-dua' -ErrorAction SilentlyContinue | Stop-Process -Force
   Start-Sleep -Milliseconds 500
   Add-Type -AssemblyName System.Xaml, System.Windows.Forms, System.Drawing
+  # an install updated by an older version may lack a newer source file: fetch it from the project's src folder
+  $sources = 'dua-widget.cs', 'widget-ui.cs', 'widget-extras.cs', 'hidio.cs', 'batteries.cs'
+  foreach ($f in $sources) {
+    $p = Join-Path $Root $f
+    if ((Test-Path $p) -or -not $Settings['update_url']) { continue }
+    try {
+      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+      Invoke-WebRequest -Uri ($Settings['update_url'].TrimEnd('/') + "/src/$f") -OutFile $p -UseBasicParsing -TimeoutSec 60
+      Unblock-File -LiteralPath $p; Write-Log "fetched missing $f"
+    } catch { Write-Log "could not fetch ${f}: $($_.Exception.Message)" }
+  }
   $refs = @([System.Windows.Window].Assembly.Location, [System.Windows.Media.Brush].Assembly.Location,
             [System.Windows.DependencyObject].Assembly.Location, [System.Xaml.XamlReader].Assembly.Location,
             [System.Linq.Enumerable].Assembly.Location, [System.Windows.Forms.NotifyIcon].Assembly.Location,
             [System.Drawing.Bitmap].Assembly.Location)
-  Add-Type -Path (Join-Path $Root 'dua-widget.cs'), (Join-Path $Root 'widget-ui.cs'), (Join-Path $Root 'hidio.cs'), (Join-Path $Root 'batteries.cs') -ReferencedAssemblies $refs -OutputAssembly $widget -OutputType WindowsApplication
+  Add-Type -Path @($sources | ForEach-Object { Join-Path $Root $_ }) -ReferencedAssemblies $refs -OutputAssembly $widget -OutputType WindowsApplication
+  # the same exe is also the rest screen (Windows runs screensavers as <name>.scr /s)
+  $rest = Join-Path $Root 'adhkar-rest.scr'
+  try { Copy-Item -LiteralPath $widget -Destination $rest -Force -ErrorAction Stop } catch { Write-Log ('rest screen copy: ' + $_.Exception.Message) }
   $wSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
   Register-ScheduledTask -TaskName $TaskWidget -Action (New-ScheduledTaskAction -Execute $widget -Argument "$DuaSeconds" -WorkingDirectory $Root) -Trigger (New-ScheduledTaskTrigger -AtLogOn -User $user) -Settings $wSettings -Description 'Rotating dua on the desktop' -Force | Out-Null
   Start-ScheduledTask -TaskName $TaskWidget
@@ -722,6 +765,7 @@ function Uninstall-Adhkar {
   Unregister-ScheduledTask -TaskName $TaskRefresh -Confirm:$false -ErrorAction SilentlyContinue
   Unregister-ScheduledTask -TaskName $TaskAlert -Confirm:$false -ErrorAction SilentlyContinue
   Remove-Item "HKCU:\Software\Classes\AppUserModelId\$AppId" -Recurse -Force -ErrorAction SilentlyContinue
+  $Settings['rest_minutes'] = '0'; try { Set-RestScreen } catch {}            # remove our screensaver
   $default = Join-Path $env:WINDIR 'Web\Wallpaper\Windows\img0.jpg'          # back to the normal Windows wallpaper
   if (Test-Path $default) { Set-Wallpaper $default }
 }

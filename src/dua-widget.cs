@@ -106,6 +106,10 @@ public static partial class DuaWidget {
     dir = AppDomain.CurrentDomain.BaseDirectory;
     // "اقفله الحين" button on the frozen-app notification opens adhkar-kill:<one-time token>
     if (args.Length > 0 && args[0].StartsWith("adhkar-kill:", StringComparison.OrdinalIgnoreCase)) { KillFromToken(args[0]); return; }
+    // started as the screensaver (adhkar-rest.scr): /s = show, /p = preview box, /c = settings
+    string a0 = args.Length > 0 ? args[0].Trim().ToLowerInvariant() : "";
+    if (a0.StartsWith("/s")) { RunRestScreen(args.Length > 1 && args[1] == "/test"); return; }
+    if (a0.StartsWith("/p") || a0.StartsWith("/c")) return;
 
     bool firstInstance;
     instanceMutex = new Mutex(true, "Local\\MakkahAdhkarDuaWidget", out firstInstance);
@@ -118,6 +122,7 @@ public static partial class DuaWidget {
     LoadSettings();                                            // the settings window's choices win over the task argument
     Gold = ThemeColor(CfgStr("theme", "gold"), 210);
     LoadDrainHistory();
+    LoadPlayLog();
     listFile = Path.Combine(dir, "adhkar.txt");
     prayersFile = Path.Combine(dir, "next-prayers.txt");
     weatherFile = Path.Combine(dir, "weather.txt");
@@ -166,6 +171,10 @@ public static partial class DuaWidget {
     double workBottom = SystemParameters.WorkArea.Bottom / scale;         // top edge of the taskbar
     MakeLayer(vw / 2 - 450, workBottom - 44, 900, 40, batteryPanel);
 
+    // game shelf, bottom-left (clickable: a cover starts the game); as many covers as fit before the tasbih line (centred on cx, ~450 wide)
+    shelfMax = Math.Max(0, Math.Min(5, (int)((cx - 230 - 34 - 30) / 79)));
+    MakeLayer(34, workBottom - 200, 79 * 5 + 20, 190, BuildShelf(), false);
+
     UpdateClock(true);
     NextDua(true);
 
@@ -189,6 +198,11 @@ public static partial class DuaWidget {
     batteryTimer.Start();
     deviceChangeTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };   // something was plugged in / out
     deviceChangeTimer.Tick += delegate { deviceChangeTimer.Stop(); ReadBatteriesAsync(); };
+
+    RefreshShelf();
+    var shelfTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(2) };          // new game played / installed
+    shelfTimer.Tick += delegate { if (!Busy()) RefreshShelf(); };
+    shelfTimer.Start();
 
     app.Run();
     if (tray != null) { tray.Visible = false; tray.Dispose(); }
@@ -228,7 +242,10 @@ public static partial class DuaWidget {
   }
 
   // A transparent, click-through window owned by the desktop (survives Win+D, always under app windows).
-  static void MakeLayer(double x, double y, double w, double h, UIElement content) {
+  static void MakeLayer(double x, double y, double w, double h, UIElement content) { MakeLayer(x, y, w, h, content, true); }
+
+  // clickThrough = false for layers you can click (the game shelf); they still never take focus.
+  static void MakeLayer(double x, double y, double w, double h, UIElement content, bool clickThrough) {
     var win = new Window();
     win.WindowStyle = WindowStyle.None;
     win.AllowsTransparency = true;
@@ -244,7 +261,7 @@ public static partial class DuaWidget {
     win.Content = grid;
     win.SourceInitialized += delegate {
       IntPtr hwnd = new WindowInteropHelper(win).Handle;
-      SetWindowLong(hwnd, GWL_EXSTYLE, GetWindowLong(hwnd, GWL_EXSTYLE) | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE);
+      SetWindowLong(hwnd, GWL_EXSTYLE, GetWindowLong(hwnd, GWL_EXSTYLE) | (clickThrough ? WS_EX_TRANSPARENT : 0) | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE);
       IntPtr progman = FindWindow("Progman", null);
       if (progman != IntPtr.Zero) SetWindowLongPtr(hwnd, GWLP_HWNDPARENT, progman);
       SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -581,10 +598,24 @@ public static partial class DuaWidget {
     var settingsItem = new System.Windows.Forms.ToolStripMenuItem("الإعدادات...", null, delegate { OpenSettings(); });
     settingsItem.Font = new System.Drawing.Font("Segoe UI", 10.5f, System.Drawing.FontStyle.Bold);
     menu.Items.Add(settingsItem);
+    menu.Items.Add(new System.Windows.Forms.ToolStripMenuItem("شاشة الراحة الحين", null, delegate {
+      try { System.Diagnostics.Process.Start(Path.Combine(dir, "adhkar-rest.scr"), "/s"); } catch { }
+    }));
     menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
     batteryMenu = new System.Windows.Forms.ToolStripMenuItem("شحن الأجهزة");
     batteryMenu.DropDownItems.Add(new System.Windows.Forms.ToolStripMenuItem("جاري القراءة...") { Enabled = false });
     menu.Items.Add(batteryMenu);
+    var playMenu = new System.Windows.Forms.ToolStripMenuItem("وقت اللعب");
+    menu.Items.Add(playMenu);
+    menu.Opening += delegate {                                 // today, this week, and the top games of the week
+      playMenu.DropDownItems.Clear();
+      var week = PlayThisWeek();
+      playMenu.DropDownItems.Add(new System.Windows.Forms.ToolStripMenuItem("اليوم: " + Duration(PlaySecondsToday())) { Enabled = false });
+      playMenu.DropDownItems.Add(new System.Windows.Forms.ToolStripMenuItem("هالأسبوع: " + Duration(week.Values.Sum())) { Enabled = false });
+      if (week.Count > 0) playMenu.DropDownItems.Add(new System.Windows.Forms.ToolStripSeparator());
+      foreach (var g in week.OrderByDescending(x => x.Value).Take(5))
+        playMenu.DropDownItems.Add(new System.Windows.Forms.ToolStripMenuItem(g.Key + ": " + Duration(g.Value)) { Enabled = false });
+    };
     menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
     menu.Items.Add("الدعاء التالي", null, delegate { NextDua(false, true); });
 
@@ -667,6 +698,7 @@ public static partial class DuaWidget {
   // ---------------------------------------------------------------- watchdogs
   static void Watch() {
     try { CheckGameOverlay(); } catch { }
+    try { TrackPlay(); } catch { }
     if (gpuReady) {
       try {
         uint t;
