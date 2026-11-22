@@ -45,7 +45,7 @@ $Weather              = $true   # hourly Makkah weather from open-meteo.com (sen
 $DuaSeconds           = 30      # how often the dua on the desktop changes (adhkar-dua.exe); run -Mode Setup after changing
 $TaskWidget           = 'Adhkar - Dua Widget'
 $AppName              = 'حِصن'  # the program's name (notifications, right-click menu)
-$Version              = '2.6'   # shown in the settings / used by the auto-update
+$Version              = '2.7'   # shown in the settings / used by the auto-update
 
 # settings.ini (written by the settings window in adhkar-dua.exe) overrides the defaults above
 $Settings = @{}

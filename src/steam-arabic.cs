@@ -19,6 +19,25 @@ public static partial class DuaWidget {
   static readonly Dictionary<string, SteamSession> steamSessions = new Dictionary<string, SteamSession>();
   static string steamNamesJson;                                   // every game name Steam knows (never translated)
   static DateTime steamNamesAt = DateTime.MinValue;
+  static string steamMarksJson = "{}";                            // achievement name -> "m" (might be missed) or "r:٢٪" (rare, you have it)
+
+  // marks for Steam's own achievement lists: the same yellow / 💎 as in the library (installed Steam games)
+  static string ComputeSteamMarks() {
+    var marks = new Dictionary<string, string>();
+    foreach (var g in libGames.ToList()) {
+      if (g.AppId == null || g.AchTotal == 0) continue;
+      try {
+        var list = ReadSteamAchievements(g.AppId);
+        EnrichAchievements(g.AppId, list);
+        foreach (var a in list) {
+          if (string.IsNullOrEmpty(a.Name)) continue;
+          if (a.Missable) marks[a.Name] = "m";
+          else if (a.Done && a.Percent >= 0 && a.Percent < 5) marks[a.Name] = "r:" + PercentAr(a.Percent);
+        }
+      } catch { }
+    }
+    return new JavaScriptSerializer().Serialize(marks);
+  }
 
   static void StartSteamArabic() {
     var t = new Thread(delegate () {
@@ -53,6 +72,7 @@ public static partial class DuaWidget {
         } catch { }
       }
       if (steamNamesJson == null) return;                         // Steam is still starting
+      marksDue = true;
     }
     foreach (object o in list) {
       var tg = o as Dictionary<string, object>;
@@ -67,7 +87,22 @@ public static partial class DuaWidget {
       t.IsBackground = true;
       t.Start();
     }
+    if (!ReferenceEquals(marksFor, libGames)) marksDue = true;    // the game list (re)loaded since the last marks
+    if (marksDue) {                                               // after the pages are hooked: this one may go online
+      marksDue = false;
+      marksFor = libGames;
+      string marks = steamMarksJson;
+      try { marks = ComputeSteamMarks(); } catch { }
+      if (marks != steamMarksJson) {                              // tell the pages already open
+        steamMarksJson = marks;
+        List<SteamSession> open;
+        lock (steamSessions) open = steamSessions.Values.Where(x => x.Ws != null).ToList();
+        foreach (var s in open) { try { SteamSend(s, "Runtime.evaluate", new { expression = "window.__hisnSetMarks && window.__hisnSetMarks(" + marks + ")" }); } catch { } }
+      }
+    }
   }
+  static bool marksDue;
+  static object marksFor;
 
   static string ReadMessage(ClientWebSocket ws) {
     var buf = new byte[65536];
@@ -150,26 +185,53 @@ public static partial class DuaWidget {
       var req = js.DeserializeObject(payload) as Dictionary<string, object>;
       if (req == null) return;
       var texts = ((object[])req["texts"]).Select(x => x == null ? "" : x.ToString()).ToList();
-      TranslateAll(texts);
-      var outArr = texts.Select(t => CachedAr(t) ?? "").ToArray();
-      string expr = "window.__hisnTrDone && window.__hisnTrDone(" + Convert.ToInt32(req["id"]) + "," + js.Serialize(outArr) + ")";
-      var prm = new Dictionary<string, object> { { "expression", expr } };
-      if (ctx != null) prm["contextId"] = ctx;
-      SteamSend(s, "Runtime.evaluate", prm);
+      int id = Convert.ToInt32(req["id"]);
+      Action<bool> answer = delegate (bool last) {
+        var outArr = texts.Select(t => CachedAr(t) ?? "").ToArray();
+        string expr = "window.__hisnTrDone && window.__hisnTrDone(" + id + "," + js.Serialize(outArr) + "," + (last ? "true" : "false") + ")";
+        var prm = new Dictionary<string, object> { { "expression", expr } };
+        if (ctx != null) prm["contextId"] = ctx;
+        SteamSend(s, "Runtime.evaluate", prm);
+      };
+      bool missing = texts.Any(NeedsTr);
+      if (missing && texts.Any(t => CachedAr(t) != null)) answer(false);   // what we already know shows up right away
+      if (missing) TranslateAll(texts);
+      answer(true);
     } catch { }
   }
 
   static string SteamScript() {
     return @"(function(){
- if (window.__hisn) return; window.__hisn = 1;
+ var V = 4;                                                 // raise when this script changes: a newer one replaces an older one
+ if ((window.__hisn || 0) >= V) return; window.__hisn = V;
+ if (window.__hisnObs) window.__hisnObs.disconnect();
  var names = new Set(" + (steamNamesJson ?? "[]") + @");
  var AR = /[؀-ۿ]/, done = new WeakSet(), cache = new Map(), pend = new Map(), queue = [], seq = 0, timer = null;
+ var marks = " + steamMarksJson + @";
+ function ensureStyle(){
+   if (document.getElementById('hisn-style')) return;
+   var s = document.createElement('style'); s.id = 'hisn-style';
+   s.textContent = '[data-hisn-m]{color:#f5c542 !important}[data-hisn-m]::before{content:""⚠ ممكن تفوتك  "";font-size:.85em}' +
+                   '[data-hisn-r]::after{content:""  💎 "" attr(data-hisn-r);color:#78c8ff;font-size:.85em}';
+   (document.head || document.documentElement).appendChild(s);
+ }
+ function markNode(n){
+   var k = n.__hisnOrig || (n.nodeValue || '').trim(); var v = k && marks[k]; if (!v) return;
+   var p = n.parentElement; if (!p || p.hasAttribute('data-hisn-m') || p.hasAttribute('data-hisn-r')) return;
+   ensureStyle();
+   if (v === 'm') p.setAttribute('data-hisn-m', '1'); else p.setAttribute('data-hisn-r', v.substring(2));
+ }
+ window.__hisnSetMarks = function(m){
+   marks = m || {};
+   if (!document.body) return;
+   var w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT), n; while ((n = w.nextNode())) markNode(n);
+ };
  function want(t){
    var s = t.trim();
    if (s.length < 4 || AR.test(s) || names.has(s) || /^(https?:|www\.)/i.test(s)) return false;
    var lat = (s.match(/[A-Za-z]/g) || []).length;
    if (lat < 3 || lat < s.replace(/[\s\d\W]/g, '').length * 0.8) return false;
-   if (s.split(/\s+/).length < 2) return /^[A-Z]?[a-z]{8,}$/.test(s);   // one word: only real words, not user names
+   if (s.split(/\s+/).length < 2) return /^[A-Z]?[a-z]{5,}[!?.]?$/.test(s);   // one word: only plain words, not user names like xX_Ace99
    return true;
  }
  function skip(el){
@@ -184,6 +246,7 @@ public static partial class DuaWidget {
    var k = v.trim(); if (!k) return;
    n.__hisnOrig = k; n.nodeValue = v.replace(k, ar); n.__hisnAr = n.nodeValue; done.add(n);
    var p = n.parentElement; if (p && !p.title) p.title = k;
+   markNode(n);
  }
  function scan(root){
    if (!root) return;
@@ -191,6 +254,7 @@ public static partial class DuaWidget {
    if (!root || !root.ownerDocument && root !== document) return;
    var w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), n;
    while ((n = w.nextNode())) {
+     markNode(n);
      if (done.has(n) || !want(n.nodeValue) || skip(n.parentElement)) continue;
      var k = n.nodeValue.trim();
      if (cache.has(k)) { if (cache.get(k)) apply(n, cache.get(k)); continue; }
@@ -212,17 +276,17 @@ public static partial class DuaWidget {
      if (queue.length) flush();
    }, 300);
  }
- window.__hisnTrDone = function(id, out){
-   var nodes = pend.get(id); if (!nodes) return; pend.delete(id);
+ window.__hisnTrDone = function(id, out, last){
+   var nodes = pend.get(id); if (!nodes) return; if (last !== false) pend.delete(id);
    nodes.texts.forEach(function(t, i){ cache.set(t, out[i] || ''); });
    nodes.forEach(function(n){ var k = n.nodeValue && n.nodeValue.trim(); if (k && cache.get(k)) apply(n, cache.get(k)); });
  };
- new MutationObserver(function(ms){
+ (window.__hisnObs = new MutationObserver(function(ms){
    ms.forEach(function(m){
      if (m.type === 'characterData') { var t = m.target; if (t.nodeValue !== t.__hisnAr) { done.delete(t); scan(t); } }
      else m.addedNodes.forEach(function(a){ scan(a); });
    });
- }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+ })).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
  if (document.body) scan(document.body); else document.addEventListener('DOMContentLoaded', function(){ scan(document.body); });
 })();";
   }

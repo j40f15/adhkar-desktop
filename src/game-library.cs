@@ -93,13 +93,29 @@ public static partial class DuaWidget {
       }
       var batch = new List<string>();
       int len = 0;
-      while (i < todo.Count && !todo[i].Contains("\n") && todo[i].Length <= 1500 && len + todo[i].Length < 3500) { batch.Add(todo[i]); len += todo[i].Length + 1; i++; }
-      try {
-        string[] lines = GoogleAr(string.Join("\n", batch.ToArray())).Split('\n');
-        if (lines.Length == batch.Count) { for (int k = 0; k < batch.Count; k++) if (lines[k].Trim().Length > 0) done.Add(new KeyValuePair<string, string>(batch[k], lines[k].Trim())); }
-        else foreach (string one in batch) { try { done.Add(new KeyValuePair<string, string>(one, GoogleAr(one).Trim())); } catch { } }
-      } catch { }
+      while (i < todo.Count && batch.Count < 40 && !todo[i].Contains("\n") && todo[i].Length <= 1500 && len + todo[i].Length < 3000) { batch.Add(todo[i]); len += todo[i].Length + 1; i++; }
+      TranslateBatch(batch, done);
     }
+    SaveTr(done);
+  }
+
+  // one request for many lines; if the answer comes back with lines merged or split, halve the batch and try again
+  static void TranslateBatch(List<string> batch, List<KeyValuePair<string, string>> done) {
+    if (batch.Count == 0) return;
+    try {
+      string[] lines = GoogleAr(string.Join("\n", batch.ToArray())).Split('\n');
+      if (lines.Length == batch.Count) {
+        for (int k = 0; k < batch.Count; k++) if (lines[k].Trim().Length > 0) done.Add(new KeyValuePair<string, string>(batch[k], lines[k].Trim()));
+        return;
+      }
+    } catch { return; }                                           // offline / refused: leave them for next time
+    if (batch.Count == 1) return;
+    int half = batch.Count / 2;
+    TranslateBatch(batch.GetRange(0, half), done);
+    TranslateBatch(batch.GetRange(half, batch.Count - half), done);
+  }
+
+  static void SaveTr(List<KeyValuePair<string, string>> done) {
     if (done.Count == 0) return;
     lock (trLock) {
       foreach (var d in done) trCache[d.Key] = d.Value;
@@ -170,7 +186,86 @@ public static partial class DuaWidget {
     return list;
   }
 
-  class Ach { public string Name, Desc, Icon, IconGray; public bool Done, Hidden; public long Time; }
+  class Ach {
+    public string Name, Desc, Icon, IconGray, ApiName;
+    public bool Done, Hidden;
+    public long Time;
+    public double Percent = -1;                                   // % of all players who have it (Steam's public numbers), -1 unknown
+    public bool Missable;                                         // still locked and its text says it can be missed (a guess, shown as "ممكن")
+  }
+
+  // ---------------------------------------------------------------- rare and "might be missed" achievements
+  static readonly Dictionary<string, Dictionary<string, double>> achPercents = new Dictionary<string, Dictionary<string, double>>();
+  static readonly Dictionary<string, bool> appSinglePlayer = new Dictionary<string, bool>();
+  static readonly object achLock = new object();
+  static readonly HashSet<string> enrichTried = new HashSet<string>();
+
+  // ISteamUserStats/GetGlobalAchievementPercentagesForApp (public, no sign-in); kept a day in covers\ach
+  static Dictionary<string, double> GlobalPercents(string appId) {
+    lock (achLock) { Dictionary<string, double> c; if (achPercents.TryGetValue(appId, out c)) return c; }
+    var res = new Dictionary<string, double>();
+    string folder = Path.Combine(Path.Combine(dir, "covers"), "ach");
+    string file = Path.Combine(folder, appId + "-global.json");
+    string json = null;
+    try { if (File.Exists(file) && (DateTime.Now - File.GetLastWriteTime(file)).TotalHours < 24) json = File.ReadAllText(file, Encoding.UTF8); } catch { }
+    if (json == null) {
+      try {
+        System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12;
+        using (var wc = new System.Net.WebClient()) json = wc.DownloadString("https://api.steampowered.com/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v2/?gameid=" + appId);
+        Directory.CreateDirectory(folder);
+        File.WriteAllText(file, json, new UTF8Encoding(false));
+      } catch { json = null; }
+    }
+    if (json != null) {
+      try {
+        var root = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(json) as Dictionary<string, object>;
+        var ap = root["achievementpercentages"] as Dictionary<string, object>;
+        foreach (object o in (object[])ap["achievements"]) {
+          var d = o as Dictionary<string, object>;
+          double p;
+          if (d != null && double.TryParse(Convert.ToString(d["percent"], CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out p)) res[JsStr(d, "name")] = p;
+        }
+      } catch { }
+      lock (achLock) achPercents[appId] = res;                    // offline: try again next time
+    }
+    return res;
+  }
+
+  static bool SinglePlayer(string appId) {                        // Steam store category 2 = Single-player
+    lock (achLock) { bool b; if (appSinglePlayer.TryGetValue(appId, out b)) return b; }
+    AboutInfo info = null;
+    try { info = FetchAbout(appId); } catch { }
+    if (info == null) return false;
+    bool sp = info.Cats.Contains(2);
+    lock (achLock) appSinglePlayer[appId] = sp;
+    return sp;
+  }
+
+  static bool EnrichReady(string appId) { lock (achLock) return achPercents.ContainsKey(appId) && appSinglePlayer.ContainsKey(appId); }
+
+  // Steam has no "missable" flag: words in the achievement's own text that usually mean a one-time chance
+  static readonly Regex MissableRx = new Regex(
+    @"\b(before (you )?(finish|complet|leav|reach|end|beat)|before (the )?(end|chapter|act|mission|level|final|boss|credits)|prior to|point of no return|missable|permanently" +
+    @"|in (a|one|the same) (single )?(playthrough|run|save|campaign)|single playthrough|one playthrough" +
+    @"|(without|don't|do not|never) (kill|killing|harm|harming|alert|alerting|being (seen|detected|spotted))|\bspare\b|let \w+ (live|go|escape)|side with|chose to|choose to|decide to|refuse to)" +
+    @"|بدون (أن )?تقتل|دون (أن )?تقتل|قبل (أن )?(تنهي|نهاية|الفصل|المهمة)|في (لعبة|جولة|محاولة) واحدة",
+    RegexOptions.IgnoreCase);
+
+  // percentages + "might be missed" (single-player games only). May go online, so not on the UI thread unless EnrichReady.
+  static void EnrichAchievements(string appId, List<Ach> list) {
+    var pc = GlobalPercents(appId);
+    bool sp = SinglePlayer(appId);
+    foreach (var a in list) {
+      double p;
+      a.Percent = a.ApiName != null && pc.TryGetValue(a.ApiName, out p) ? p : -1;
+      a.Missable = sp && !a.Done && MissableRx.IsMatch((a.Name ?? "") + " " + (a.Desc ?? ""));
+    }
+  }
+
+  static string PercentAr(double p) {
+    string s = p < 10 ? p.ToString("0.#", CultureInfo.InvariantCulture) : Math.Round(p).ToString(CultureInfo.InvariantCulture);
+    return Digits(s.Replace('.', '٫')) + "٪";
+  }
 
   static string Localized(KV k) {                                 // Arabic when the game has it, else English
     if (k == null) return "";
@@ -225,7 +320,8 @@ public static partial class DuaWidget {
           a.IconGray = disp.Str("icon_gray");
           a.Hidden = disp.Str("hidden") == "1";
         }
-        if (string.IsNullOrEmpty(a.Name)) a.Name = bit.Str("name") ?? "";
+        a.ApiName = bit.Str("name");
+        if (string.IsNullOrEmpty(a.Name)) a.Name = a.ApiName ?? "";
         a.Done = index >= 0 && index < 32 && ((data >> index) & 1) == 1;
         if (times != null) { var tk = times.Get(index.ToString()); if (tk != null && tk.Value is int) a.Time = (uint)(int)tk.Value; }
         res.Add(a);
@@ -249,6 +345,9 @@ public static partial class DuaWidget {
   static Game libAboutGame;                                       // set while "about the game" is shown
   static Border libLangButton;
   static bool InPage() { return libAchGame != null || libAboutGame != null; }
+  static bool libNearOnly;                                        // "قربت تختمها" filter
+  static Border libNearButton;
+  static bool NearDone(Game g) { return g.AchTotal > 0 && g.AchDone < g.AchTotal && g.AchDone * 10 >= g.AchTotal * 7; }   // 70%+ done
   static StackPanel libAchList;
   static string shownLib;
   static Dictionary<string, int> libWeek = new Dictionary<string, int>();
@@ -576,6 +675,9 @@ public static partial class DuaWidget {
     sbox.Children.Add(hint); sbox.Children.Add(libSearch);
     tools.Children.Add(new Border { CornerRadius = new CornerRadius(10), Background = new SolidColorBrush(Color.FromArgb(24, 255, 255, 255)), Child = sbox });
     libSearch.TextChanged += delegate { hint.Visibility = libSearch.Text.Length > 0 ? Visibility.Collapsed : Visibility.Visible; ApplyLibFilter(); };
+    libNearButton = PillButton("🎯 قربت تختمها", delegate { libNearOnly = !libNearOnly; ApplyLibFilter(); });
+    libNearButton.Visibility = Visibility.Collapsed;
+    tools.Children.Add(libNearButton);
     libHiddenButton = PillButton("المخفية", delegate { libShowHidden = !libShowHidden; FillLibrary(); });
     libHiddenButton.Visibility = Visibility.Collapsed;
     tools.Children.Add(libHiddenButton);
@@ -630,7 +732,7 @@ public static partial class DuaWidget {
       }
     };
     w.Deactivated += delegate { if (!libDialogOpen) CloseLibrary(); };
-    w.Closed += delegate { libWin = null; libGrid = null; libSearch = null; libHiddenButton = null; shownLib = null; libShowHidden = false; libAchGame = null; libAchList = null; libAboutGame = null; };
+    w.Closed += delegate { libWin = null; libGrid = null; libSearch = null; libHiddenButton = null; libNearButton = null; shownLib = null; libShowHidden = false; libNearOnly = false; libAchGame = null; libAchList = null; libAboutGame = null; };
     w.Loaded += delegate {
       w.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(140)));
       libSearch.Focus();
@@ -724,7 +826,8 @@ public static partial class DuaWidget {
     int shown = 0;
     foreach (FrameworkElement c in libGrid.Children) {
       var g = (Game)c.Tag;
-      bool ok = q.Length == 0 || g.Name.IndexOf(q, StringComparison.CurrentCultureIgnoreCase) >= 0 || g.Name.IndexOf(q2, StringComparison.CurrentCultureIgnoreCase) >= 0;
+      bool ok = (q.Length == 0 || g.Name.IndexOf(q, StringComparison.CurrentCultureIgnoreCase) >= 0 || g.Name.IndexOf(q2, StringComparison.CurrentCultureIgnoreCase) >= 0)
+                && (!libNearOnly || NearDone(g));
       c.Visibility = ok ? Visibility.Visible : Visibility.Collapsed;
       if (ok) shown++;
     }
@@ -732,6 +835,12 @@ public static partial class DuaWidget {
     int trophies = libGames.Where(g => !g.Hidden).Sum(g => g.AchDone);
     if (libCount != null) libCount.Text = libShowHidden ? "المخفية: " + GamesText(hiddenCount)
       : (libLoading && libGames.Count == 0 ? "جاري البحث عن ألعابك..." : (total == 0 ? "" : GamesText(total) + (trophies > 0 ? "   ·   🏆 " + TrophiesText(trophies) : "")));
+    int nearCount = libGames.Count(g => !g.Hidden && NearDone(g));
+    if (libNearOnly && libCount != null) libCount.Text = "🎯 قربت تختمها: " + GamesText(nearCount);
+    if (libNearButton != null) {
+      libNearButton.Visibility = (nearCount > 0 || libNearOnly) && !libShowHidden ? Visibility.Visible : Visibility.Collapsed;
+      ((TextBlock)libNearButton.Child).Text = libNearOnly ? "كل الألعاب" : "🎯 قربت تختمها (" + Digits(nearCount.ToString()) + ")";
+    }
     if (libHiddenButton != null) {
       libHiddenButton.Visibility = hiddenCount > 0 || libShowHidden ? Visibility.Visible : Visibility.Collapsed;
       ((TextBlock)libHiddenButton.Child).Text = libShowHidden ? "رجوع للمكتبة" : "المخفية (" + Digits(hiddenCount.ToString()) + ")";
@@ -771,6 +880,7 @@ public static partial class DuaWidget {
 
   static string GameSub(Game g) {
     string src = g.Source;
+    if (NearDone(g)) return src + "  ·  🎯 باقي " + TrophiesText(g.AchTotal - g.AchDone) + " وتختمها";
     int week;
     if (libWeek.TryGetValue(g.Name, out week) && week >= 60) return src + "  ·  هالأسبوع " + Duration(week);
     if (g.SteamMinutes >= 60) return src + "  ·  " + HoursText2(g.SteamMinutes / 60) + " لعب";
@@ -819,7 +929,7 @@ public static partial class DuaWidget {
     card.Children.Add(new TextBlock { Text = g.Name, Foreground = new SolidColorBrush(Color.FromRgb(236, 236, 236)), FontSize = 14.5, FontWeight = FontWeights.SemiBold,
                                       TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(3, 10, 3, 0), ToolTip = g.Name,
                                       FlowDirection = ltr ? FlowDirection.LeftToRight : FlowDirection.RightToLeft, TextAlignment = ltr ? TextAlignment.Right : TextAlignment.Left });
-    card.Children.Add(new TextBlock { Text = GameSub(g), Foreground = new SolidColorBrush(Color.FromRgb(135, 135, 135)), FontSize = 12.5, Margin = new Thickness(3, 3, 3, 0), TextTrimming = TextTrimming.CharacterEllipsis });
+    card.Children.Add(new TextBlock { Text = GameSub(g), Foreground = new SolidColorBrush(NearDone(g) ? Gold : Color.FromRgb(135, 135, 135)), FontSize = 12.5, Margin = new Thickness(3, 3, 3, 0), TextTrimming = TextTrimming.CharacterEllipsis });
 
     card.MouseEnter += delegate {
       cover.BorderBrush = new SolidColorBrush(Gold);
@@ -875,12 +985,18 @@ public static partial class DuaWidget {
     if (list.Count == 0) return;
     libAboutGame = null;
     libAchGame = g;
+    bool enriched = EnrichReady(g.AppId);
+    if (enriched) EnrichAchievements(g.AppId, list);              // from memory, no waiting
     int done = list.Count(a => a.Done);
     double pct = 100.0 * done / list.Count;
+    int rare = list.Count(a => a.Done && a.Percent >= 0 && a.Percent < 5), missable = list.Count(a => a.Missable);
 
     var page = new StackPanel { Margin = new Thickness(34, 0, 34, 16) };
     var sum = new TextBlock { FontSize = 17, Foreground = Brushes.White, Margin = new Thickness(0, 0, 0, 10),
-                              Text = "حصلت " + Digits(done.ToString()) + " من " + Digits(list.Count.ToString()) + " جائزة   ·   " + Digits(((int)Math.Round(pct)).ToString()) + "٪" };
+                              Text = "حصلت " + Digits(done.ToString()) + " من " + Digits(list.Count.ToString()) + " جائزة   ·   " + Digits(((int)Math.Round(pct)).ToString()) + "٪"
+                                   + (rare > 0 ? "   ·   💎 نادرة عندك: " + Digits(rare.ToString()) : "")
+                                   + (missable > 0 ? "   ·   ⚠ ممكن تفوتك: " + Digits(missable.ToString()) : "")
+                                   + (done < list.Count ? "   ·   🎯 باقي " + TrophiesText(list.Count - done) + " وتختمها" : "   ·   🎯 ختمتها!") };
     page.Children.Add(sum);
     var bar = new Grid { Height = 8, Margin = new Thickness(0, 0, 0, 22), FlowDirection = FlowDirection.RightToLeft };
     bar.Children.Add(new Border { CornerRadius = new CornerRadius(4), Background = new SolidColorBrush(Color.FromArgb(30, 255, 255, 255)) });
@@ -890,8 +1006,9 @@ public static partial class DuaWidget {
     page.Children.Add(bar);
 
     libAchList = new StackPanel();
-    // unlocked first (newest first), then the ones still to get
-    foreach (var a in list.Where(x => x.Done).OrderByDescending(x => x.Time).Concat(list.Where(x => !x.Done))) libAchList.Children.Add(AchRow(g.AppId, a));
+    // unlocked first (newest first), then the ones you might miss, then the rest (most common first = easiest)
+    var locked = list.Where(x => !x.Done).OrderByDescending(x => x.Missable).ThenByDescending(x => x.Percent);
+    foreach (var a in list.Where(x => x.Done).OrderByDescending(x => x.Time).Concat(locked)) libAchList.Children.Add(AchRow(g.AppId, a));
     page.Children.Add(libAchList);
 
     libScroll.Content = page;
@@ -901,6 +1018,7 @@ public static partial class DuaWidget {
     libCount.Text = "🏆 الجوائز";
     libAddButton.Visibility = Visibility.Collapsed;
     if (libHiddenButton != null) libHiddenButton.Visibility = Visibility.Collapsed;
+    if (libNearButton != null) libNearButton.Visibility = Visibility.Collapsed;
     libBackButton.Visibility = Visibility.Visible;
     libHint.Text = "دوّر على جائزة...";
     libSearch.Text = "";
@@ -910,6 +1028,15 @@ public static partial class DuaWidget {
     var texts = list.SelectMany(a => new[] { a.Name, a.Desc }).ToList();
     if (TranslateThen("ach:" + g.AppId, texts, delegate { if (libAchGame == g && libWin != null) ShowAchievements(g); }))
       sum.Text += "   ·   جاري التعريب...";
+    if (!enriched && !enrichTried.Contains(g.AppId)) {            // first time: fetch the percentages, then redraw
+      enrichTried.Add(g.AppId);
+      var t = new System.Threading.Thread(delegate () {
+        try { EnrichAchievements(g.AppId, new List<Ach>()); } catch { }
+        Application.Current.Dispatcher.BeginInvoke(new Action(delegate { if (libAchGame == g && libWin != null) ShowAchievements(g); }));
+      });
+      t.IsBackground = true;
+      t.Start();
+    }
   }
 
   static void SetLangButton(bool useful) {
@@ -936,8 +1063,10 @@ public static partial class DuaWidget {
 
   static FrameworkElement AchRow(string appId, Ach a) {
     bool secret = a.Hidden && !a.Done;
+    var yellow = Color.FromRgb(245, 197, 66);
     var row = new Border { Tag = a, CornerRadius = new CornerRadius(12), Padding = new Thickness(14, 12, 14, 12), Margin = new Thickness(0, 0, 0, 8),
-                           Background = new SolidColorBrush(a.Done ? Color.FromArgb(22, 255, 255, 255) : Color.FromArgb(10, 255, 255, 255)) };
+                           Background = new SolidColorBrush(a.Missable ? Color.FromArgb(28, 245, 197, 66) : a.Done ? Color.FromArgb(22, 255, 255, 255) : Color.FromArgb(10, 255, 255, 255)),
+                           BorderBrush = new SolidColorBrush(yellow), BorderThickness = new Thickness(a.Missable ? 1.5 : 0) };
     var g = new Grid();
     g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(64) });
     g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -953,7 +1082,7 @@ public static partial class DuaWidget {
     bool ltr = !HasArabic(name);
     var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(16, 0, 16, 0) };
     text.Children.Add(new TextBlock { Text = name, FontSize = 16, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap,
-                                      Foreground = new SolidColorBrush(a.Done ? Color.FromRgb(240, 240, 240) : Color.FromRgb(160, 160, 160)),
+                                      Foreground = new SolidColorBrush(a.Missable ? yellow : a.Done ? Color.FromRgb(240, 240, 240) : Color.FromRgb(160, 160, 160)),
                                       FlowDirection = ltr ? FlowDirection.LeftToRight : FlowDirection.RightToLeft, TextAlignment = ltr ? TextAlignment.Right : TextAlignment.Left });
     if (!string.IsNullOrEmpty(desc)) {
       bool dltr = !HasArabic(desc);
@@ -961,16 +1090,23 @@ public static partial class DuaWidget {
                                         Foreground = new SolidColorBrush(Color.FromRgb(135, 135, 135)),
                                         FlowDirection = dltr ? FlowDirection.LeftToRight : FlowDirection.RightToLeft, TextAlignment = dltr ? TextAlignment.Right : TextAlignment.Left });
     }
+    if (a.Percent >= 0) {                                         // how many players have it, from Steam's public numbers
+      bool rareOne = a.Percent < 5;
+      string line = "حصلها " + PercentAr(a.Percent) + " من اللاعبين" + (a.Done && rareOne ? "   ·   💎 " + (a.Percent < 1 ? "نادرة جداً" : "نادرة") : "");
+      text.Children.Add(new TextBlock { Text = line, FontSize = 12.5, Margin = new Thickness(0, 4, 0, 0),
+                                        Foreground = new SolidColorBrush(a.Done && rareOne ? Color.FromRgb(120, 200, 255) : Color.FromRgb(105, 105, 105)) });
+    }
     Grid.SetColumn(text, 1);
     g.Children.Add(text);
 
-    string when = "ما حصلتها للحين";
+    string when = a.Missable ? "⚠ ممكن تفوتك" : "ما حصلتها للحين";
     if (a.Done) {
       when = "✔ حصلتها";
       if (a.Time > 0) { DateTime t = UnixEpoch.AddSeconds(a.Time).ToLocalTime(); when = "✔ " + Digits(t.Day.ToString()) + " " + Months[t.Month - 1] + " " + Digits(t.Year.ToString()); }
     }
     var whenText = new TextBlock { Text = when, FontSize = 13, VerticalAlignment = VerticalAlignment.Center,
-                                   Foreground = new SolidColorBrush(a.Done ? Gold : Color.FromRgb(110, 110, 110)) };
+                                   Foreground = new SolidColorBrush(a.Done ? Gold : a.Missable ? yellow : Color.FromRgb(110, 110, 110)) };
+    if (a.Missable) whenText.ToolTip = "حسب وصف الجائزة، لو ما سويتها في وقتها ممكن تضيع وتحتاج تعيد اللعبة";
     Grid.SetColumn(whenText, 2);
     g.Children.Add(whenText);
     row.Child = g;
@@ -978,7 +1114,7 @@ public static partial class DuaWidget {
   }
 
   // ---------------------------------------------------------------- "about the game" page (Steam store text, translated; the game's name stays as it is)
-  class AboutInfo { public string Short, About, Header, Genres, Devs, Release; }
+  class AboutInfo { public string Short, About, Header, Genres, Devs, Release; public HashSet<int> Cats = new HashSet<int>(); }
 
   static string HtmlToText(string html) {
     if (string.IsNullOrEmpty(html)) return "";
@@ -1018,6 +1154,8 @@ public static partial class DuaWidget {
     if (data.TryGetValue("genres", out o) && o is object[]) info.Genres = string.Join("، ", ((object[])o).Select(x => JsStr(x as Dictionary<string, object>, "description")).Where(x => x.Length > 0).ToArray());
     if (data.TryGetValue("developers", out o) && o is object[]) info.Devs = string.Join("، ", ((object[])o).Select(x => x == null ? "" : x.ToString()).ToArray());
     if (data.TryGetValue("release_date", out o)) info.Release = JsStr(o as Dictionary<string, object>, "date");
+    if (data.TryGetValue("categories", out o) && o is object[])
+      foreach (object c in (object[])o) { int id; if (int.TryParse(JsStr(c as Dictionary<string, object>, "id"), out id)) info.Cats.Add(id); }
     if (info.About == info.Short) info.About = "";
     return info;
   }
