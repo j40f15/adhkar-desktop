@@ -325,9 +325,13 @@ public static partial class DuaWidget {
       keyBox.BorderBrush = new SolidColorBrush(Gold);
     };
     root.Children.Add(Row("اختصار مكتبة الألعاب", keyBox));
+    root.Children.Add(new TextBlock { Text = "تقدر تختار حرف أو رقم لحاله. يفتح المكتبة لما ما تكون تكتب في خانة كتابة، وفي المتصفح وديسكورد يروح الحرف لهم عادي.",
+                                      TextWrapping = TextWrapping.Wrap, FontSize = 12.5, Foreground = new SolidColorBrush(Color.FromRgb(140, 140, 140)), Margin = new Thickness(0, 0, 0, 6) });
     var blockGame = Check("لا ضغطته وأنا ألعب، يروح الزر للعبة وما تفتح المكتبة", CfgBool("library_block_game", true));
     var blockCode = Check("لا ضغطته وأنا أبرمج (VS Code وغيره)، ما تفتح المكتبة", CfgBool("library_block_coding", true));
     root.Children.Add(blockGame); root.Children.Add(blockCode);
+    var translate = Check("عرّب الجوائز وشرح الألعاب في المكتبة (ترجمة آلية)", CfgBool("translate_ar", true));
+    root.Children.Add(translate);
     w.PreviewKeyDown += (s, e) => {
       if (!hkRecording) return;
       e.Handled = true;
@@ -341,11 +345,7 @@ public static partial class DuaWidget {
       if ((Keyboard.Modifiers & ModifierKeys.Windows) != 0) mods |= 8;
       int vk = KeyInterop.VirtualKeyFromKey(key);
       if ((key == Key.Back || key == Key.Delete) && mods == 0) { newMods = 0; newVk = 0; }
-      else {
-        bool plain = (key >= Key.A && key <= Key.Z) || (key >= Key.D0 && key <= Key.D9) || key == Key.Space || key == Key.Enter || key == Key.Tab;
-        if (plain && (mods & 3) == 0) { keyText.Text = "هذا الزر لازم معه Ctrl أو Alt"; return; }   // or it would eat normal typing
-        newMods = mods; newVk = vk;
-      }
+      else { newMods = mods; newVk = vk; }                       // any key, even one letter or number on its own
       hkRecording = false;
       keyText.Text = HotkeyText(newMods, newVk);
       keyBox.BorderBrush = new SolidColorBrush(Color.FromRgb(70, 70, 70));
@@ -385,6 +385,7 @@ public static partial class DuaWidget {
       SetCfg("library_hotkey", newMods + "," + newVk);
       SetCfg("library_block_game", blockGame.IsChecked == true);
       SetCfg("library_block_coding", blockCode.IsChecked == true);
+      SetCfg("translate_ar", translate.IsChecked == true);
       SetCfg("rest_minutes", restVals[Math.Max(0, rest.SelectedIndex)]);
       SetCfg("battery_low", lowVals[Math.Max(0, low.SelectedIndex)]);
       SetCfg("battery_full_alert", full.IsChecked == true);

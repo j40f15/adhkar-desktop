@@ -16,8 +16,114 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
+using System.Web.Script.Serialization;
 
 public static partial class DuaWidget {
+  // ---------------------------------------------------------------- Arabic translation
+  // Google Translate's free web endpoint. Only game text is sent (achievement names, game descriptions), nothing about you.
+  // Every result is kept in covers\translations-ar.txt so a text is only translated once.
+  static Dictionary<string, string> trCache;
+  static readonly object trLock = new object();
+  static readonly HashSet<string> trTried = new HashSet<string>();   // pages already sent this run (no retry loop when offline)
+  static bool trOriginal;                                         // "English" button: show the original text
+
+  static bool Translating() { return CfgBool("translate_ar", true) && !trOriginal; }
+  static string TrFile() { return Path.Combine(Path.Combine(dir, "covers"), "translations-ar.txt"); }
+  static string TrEsc(string s) { return s.Replace("\\", "\\\\").Replace("\t", "\\t").Replace("\r", "").Replace("\n", "\\n"); }
+  static string TrUnesc(string s) {
+    var sb = new StringBuilder();
+    for (int i = 0; i < s.Length; i++) {
+      if (s[i] == '\\' && i + 1 < s.Length) { char c = s[++i]; sb.Append(c == 'n' ? '\n' : c == 't' ? '\t' : c); }
+      else sb.Append(s[i]);
+    }
+    return sb.ToString();
+  }
+
+  static void LoadTr() {
+    lock (trLock) {
+      if (trCache != null) return;
+      trCache = new Dictionary<string, string>();
+      try {
+        foreach (string l in File.ReadAllLines(TrFile(), Encoding.UTF8)) {
+          int i = l.IndexOf('\t');
+          if (i > 0) trCache[TrUnesc(l.Substring(0, i))] = TrUnesc(l.Substring(i + 1));
+        }
+      } catch { }
+    }
+  }
+
+  static string CachedAr(string en) {
+    if (string.IsNullOrEmpty(en)) return null;
+    LoadTr();
+    lock (trLock) { string ar; return trCache.TryGetValue(en, out ar) ? ar : null; }
+  }
+
+  static bool NeedsTr(string t) { return !string.IsNullOrWhiteSpace(t) && !HasArabic(t) && CachedAr(t) == null; }
+
+  static string Tr(string t) {                                    // the Arabic text when we have it and it's wanted
+    if (string.IsNullOrEmpty(t) || !Translating()) return t;
+    return CachedAr(t) ?? t;
+  }
+
+  static string GoogleAr(string text) {
+    System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12;
+    using (var wc = new System.Net.WebClient()) {
+      wc.Encoding = Encoding.UTF8;
+      wc.Headers[System.Net.HttpRequestHeader.ContentType] = "application/x-www-form-urlencoded;charset=UTF-8";
+      string resp = wc.UploadString("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ar&dt=t", "q=" + Uri.EscapeDataString(text));
+      var root = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(resp) as object[];
+      var sb = new StringBuilder();
+      if (root != null && root.Length > 0 && root[0] is object[])
+        foreach (object seg in (object[])root[0]) { var s = seg as object[]; if (s != null && s.Length > 0 && s[0] is string) sb.Append((string)s[0]); }
+      return sb.ToString();
+    }
+  }
+
+  // Translates every text that isn't cached yet: short ones together (one per line), long ones on their own. Off the UI thread.
+  static void TranslateAll(IEnumerable<string> texts) {
+    var todo = new List<string>();
+    foreach (string t in texts) if (NeedsTr(t) && !todo.Contains(t)) todo.Add(t);
+    var done = new List<KeyValuePair<string, string>>();
+    int i = 0;
+    while (i < todo.Count) {
+      if (todo[i].Contains("\n") || todo[i].Length > 1500) {
+        try { string ar = GoogleAr(todo[i]).Trim(); if (ar.Length > 0) done.Add(new KeyValuePair<string, string>(todo[i], ar)); } catch { }
+        i++;
+        continue;
+      }
+      var batch = new List<string>();
+      int len = 0;
+      while (i < todo.Count && !todo[i].Contains("\n") && todo[i].Length <= 1500 && len + todo[i].Length < 3500) { batch.Add(todo[i]); len += todo[i].Length + 1; i++; }
+      try {
+        string[] lines = GoogleAr(string.Join("\n", batch.ToArray())).Split('\n');
+        if (lines.Length == batch.Count) { for (int k = 0; k < batch.Count; k++) if (lines[k].Trim().Length > 0) done.Add(new KeyValuePair<string, string>(batch[k], lines[k].Trim())); }
+        else foreach (string one in batch) { try { done.Add(new KeyValuePair<string, string>(one, GoogleAr(one).Trim())); } catch { } }
+      } catch { }
+    }
+    if (done.Count == 0) return;
+    lock (trLock) {
+      foreach (var d in done) trCache[d.Key] = d.Value;
+      try {
+        Directory.CreateDirectory(Path.GetDirectoryName(TrFile()));
+        File.AppendAllLines(TrFile(), done.Select(d => TrEsc(d.Key) + "\t" + TrEsc(d.Value)), new UTF8Encoding(false));
+      } catch { }
+    }
+  }
+
+  // Translate in the background, then redraw the page if it's still the one on screen.
+  static bool TranslateThen(string pageKey, IEnumerable<string> texts, Action redraw) {
+    var list = texts.Where(NeedsTr).Distinct().ToList();
+    if (list.Count == 0 || !Translating() || trTried.Contains(pageKey)) return false;
+    trTried.Add(pageKey);
+    var t = new System.Threading.Thread(delegate () {
+      try { TranslateAll(list); } catch { }
+      Application.Current.Dispatcher.BeginInvoke(redraw);
+    });
+    t.IsBackground = true;
+    t.Start();
+    return true;
+  }
+
   class Game {
     public string Key, Name, Source, LaunchUri, Exe, Dir, Cover;
     public long LastPlayed;                                       // unix seconds
@@ -140,6 +246,9 @@ public static partial class DuaWidget {
   static ScrollViewer libScroll;
   static TextBlock libTitle, libHint;
   static Game libAchGame;                                         // set while a game's achievements are shown
+  static Game libAboutGame;                                       // set while "about the game" is shown
+  static Border libLangButton;
+  static bool InPage() { return libAchGame != null || libAboutGame != null; }
   static StackPanel libAchList;
   static string shownLib;
   static Dictionary<string, int> libWeek = new Dictionary<string, int>();
@@ -217,13 +326,53 @@ public static partial class DuaWidget {
       int msg = wParam.ToInt32();
       if (msg == 0x0100 || msg == 0x0104) {                       // WM_KEYDOWN / WM_SYSKEYDOWN
         var k = (KBDLL)Marshal.PtrToStructure(lParam, typeof(KBDLL));
-        if (k.vk == hkVk && CurrentMods() == hkMods && LibraryAllowed()) {
-          Application.Current.Dispatcher.BeginInvoke(new Action(ToggleLibrary));
-          return new IntPtr(1);                                   // used: the app in front doesn't get it
+        if (k.vk == hkVk && CurrentMods() == hkMods) {
+          if (hkMods == 0 && IsTypingKey(hkVk)) {
+            // a letter or number on its own: only when you aren't typing somewhere, and it never closes the
+            // library (you may be typing it in the search box)
+            IntPtr fg = GetForegroundWindow();
+            uint pid = 0;
+            if (fg != IntPtr.Zero) GetWindowThreadProcessId(fg, out pid);
+            if (pid != OwnPid() && !TypingNow(fg) && LibraryAllowed()) {
+              Application.Current.Dispatcher.BeginInvoke(new Action(OpenLibrary));
+              return new IntPtr(1);
+            }
+          } else if (LibraryAllowed()) {
+            Application.Current.Dispatcher.BeginInvoke(new Action(ToggleLibrary));
+            return new IntPtr(1);                                 // used: the app in front doesn't get it
+          }
         }
       }
     }
     return CallNextHookEx(IntPtr.Zero, code, wParam, lParam);
+  }
+
+  static uint ownPid;
+  static uint OwnPid() { if (ownPid == 0) ownPid = (uint)Process.GetCurrentProcess().Id; return ownPid; }
+
+  static bool IsTypingKey(int vk) {                               // keys that type a character
+    return (vk >= 0x30 && vk <= 0x39) || (vk >= 0x41 && vk <= 0x5A) || (vk >= 0x60 && vk <= 0x6F) || vk == 0x20
+        || (vk >= 0xBA && vk <= 0xC0) || (vk >= 0xDB && vk <= 0xDF) || vk == 0xE2;
+  }
+
+  [StructLayout(LayoutKind.Sequential)] struct RECT4 { public int l, t, r, b; }
+  [StructLayout(LayoutKind.Sequential)] struct GUITHREADINFO { public int cbSize, flags; public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret; public RECT4 rcCaret; }
+  [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref GUITHREADINFO info);   // GetClassName is in dua-widget.cs
+
+  // Is there a text box with the cursor in it? Browsers, Discord, Steam and other web-based apps always count as typing.
+  static bool TypingNow(IntPtr fg) {
+    if (fg == IntPtr.Zero) return false;
+    uint pid;
+    uint tid = GetWindowThreadProcessId(fg, out pid);
+    var gi = new GUITHREADINFO();
+    gi.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+    if (!GetGUIThreadInfo(tid, ref gi)) return false;
+    if (gi.hwndCaret != IntPtr.Zero || (gi.flags & 1) != 0) return true;   // a blinking text cursor
+    var sb = new StringBuilder(128);
+    GetClassName(gi.hwndFocus != IntPtr.Zero ? gi.hwndFocus : fg, sb, 128);
+    string c = sb.ToString();
+    return c == "Edit" || c.StartsWith("RichEdit") || c.StartsWith("Chrome_") || c.Contains("Cef") || c.StartsWith("Mozilla") || c == "Scintilla"
+        || c == "ConsoleWindowClass" || c == "CASCADIA_HOSTING_WINDOW_CLASS" || c == "Windows.UI.Core.CoreWindow" || c.StartsWith("WinUIDesktop");
   }
 
   static void RegisterLibraryHotkey() {
@@ -432,6 +581,12 @@ public static partial class DuaWidget {
     tools.Children.Add(libHiddenButton);
     libAddButton = PillButton("+  أضف لعبة", AddGameByHand);
     tools.Children.Add(libAddButton);
+    libLangButton = PillButton("English", delegate {
+      trOriginal = !trOriginal;
+      if (libAchGame != null) ShowAchievements(libAchGame); else if (libAboutGame != null) ShowAbout(libAboutGame);
+    });
+    libLangButton.Visibility = Visibility.Collapsed;
+    tools.Children.Add(libLangButton);
     libBackButton = PillButton("→  رجوع للمكتبة", HideAchievements);
     libBackButton.Visibility = Visibility.Collapsed;
     tools.Children.Add(libBackButton);
@@ -467,15 +622,15 @@ public static partial class DuaWidget {
     frame.Child = grid;
     w.Content = frame;
     w.PreviewKeyDown += (s, e) => {
-      if (e.Key == Key.Escape) { e.Handled = true; if (libAchGame != null) HideAchievements(); else CloseLibrary(); }
-      else if (e.Key == Key.Enter && libAchGame == null) {
+      if (e.Key == Key.Escape) { e.Handled = true; if (InPage()) HideAchievements(); else CloseLibrary(); }
+      else if (e.Key == Key.Enter && !InPage()) {
         e.Handled = true;
         var first = libGrid.Children.OfType<FrameworkElement>().FirstOrDefault(c => c.Visibility == Visibility.Visible);
         if (first != null) { LaunchGame((Game)first.Tag); CloseLibrary(); }
       }
     };
     w.Deactivated += delegate { if (!libDialogOpen) CloseLibrary(); };
-    w.Closed += delegate { libWin = null; libGrid = null; libSearch = null; libHiddenButton = null; shownLib = null; libShowHidden = false; libAchGame = null; libAchList = null; };
+    w.Closed += delegate { libWin = null; libGrid = null; libSearch = null; libHiddenButton = null; shownLib = null; libShowHidden = false; libAchGame = null; libAchList = null; libAboutGame = null; };
     w.Loaded += delegate {
       w.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(140)));
       libSearch.Focus();
@@ -552,12 +707,13 @@ public static partial class DuaWidget {
     if (libGrid == null) return;
     string q = libSearch == null ? "" : libSearch.Text.Trim();
     string q2 = FromArabicKeyboard(q);
+    if (libAboutGame != null) { if (libEmpty != null) libEmpty.Visibility = Visibility.Collapsed; return; }
     if (libAchGame != null && libAchList != null) {               // achievements page: the search box filters achievements
       int n = 0;
       foreach (FrameworkElement r in libAchList.Children) {
         var a = r.Tag as Ach;
         if (a == null) continue;
-        string text = (a.Hidden && !a.Done ? "" : a.Name + " " + a.Desc);
+        string text = (a.Hidden && !a.Done ? "" : a.Name + " " + a.Desc + " " + Tr(a.Name) + " " + Tr(a.Desc));
         bool ok = q.Length == 0 || text.IndexOf(q, StringComparison.CurrentCultureIgnoreCase) >= 0 || text.IndexOf(q2, StringComparison.CurrentCultureIgnoreCase) >= 0;
         r.Visibility = ok ? Visibility.Visible : Visibility.Collapsed;
         if (ok) n++;
@@ -685,6 +841,7 @@ public static partial class DuaWidget {
     var menu = new ContextMenu { FlowDirection = FlowDirection.RightToLeft };
     AddMenuItem(menu, "▶  شغّل", delegate { LaunchGame(g); CloseLibrary(); });
     if (g.AchTotal > 0) AddMenuItem(menu, "🏆  الجوائز", delegate { ShowAchievements(g); });
+    if (g.AppId != null) AddMenuItem(menu, "📖  عن اللعبة", delegate { ShowAbout(g); });
     if (!string.IsNullOrEmpty(g.Dir) && Directory.Exists(g.Dir))
       AddMenuItem(menu, "افتح مجلد اللعبة", delegate { try { Process.Start("explorer.exe", "\"" + g.Dir + "\""); } catch { } CloseLibrary(); });
     AddMenuItem(menu, "غيّر الصورة...", delegate { ChangeCover(g); });
@@ -716,6 +873,7 @@ public static partial class DuaWidget {
     List<Ach> list;
     try { list = ReadSteamAchievements(g.AppId); } catch { list = new List<Ach>(); }
     if (list.Count == 0) return;
+    libAboutGame = null;
     libAchGame = g;
     int done = list.Count(a => a.Done);
     double pct = 100.0 * done / list.Count;
@@ -748,16 +906,28 @@ public static partial class DuaWidget {
     libSearch.Text = "";
     libSearch.Focus();
     ApplyLibFilter();
+    SetLangButton(list.Any(a => !HasArabic(a.Name ?? "")));
+    var texts = list.SelectMany(a => new[] { a.Name, a.Desc }).ToList();
+    if (TranslateThen("ach:" + g.AppId, texts, delegate { if (libAchGame == g && libWin != null) ShowAchievements(g); }))
+      sum.Text += "   ·   جاري التعريب...";
+  }
+
+  static void SetLangButton(bool useful) {
+    if (libLangButton == null) return;
+    libLangButton.Visibility = useful && CfgBool("translate_ar", true) ? Visibility.Visible : Visibility.Collapsed;
+    ((TextBlock)libLangButton.Child).Text = trOriginal ? "عربي" : "English";
   }
 
   static void HideAchievements() {
     if (libWin == null) return;
-    libAchGame = null; libAchList = null;
+    libAchGame = null; libAchList = null; libAboutGame = null;
+    trOriginal = false;
     libScroll.Content = libGrid;
     libTitle.Text = "مكتبة الألعاب";
     libTitle.FlowDirection = FlowDirection.RightToLeft;
     libAddButton.Visibility = Visibility.Visible;
     libBackButton.Visibility = Visibility.Collapsed;
+    libLangButton.Visibility = Visibility.Collapsed;
     libHint.Text = "دوّر على لعبة...";
     libSearch.Text = "";
     libSearch.Focus();
@@ -778,8 +948,8 @@ public static partial class DuaWidget {
     SetAchIcon(img, appId, a.Done ? a.Icon : (a.IconGray ?? a.Icon));
     g.Children.Add(iconBox);
 
-    string name = secret ? "جائزة مخفية" : a.Name;
-    string desc = secret ? "تنكشف لما تحصلها" : a.Desc;
+    string name = secret ? "جائزة مخفية" : Tr(a.Name);
+    string desc = secret ? "تنكشف لما تحصلها" : Tr(a.Desc);
     bool ltr = !HasArabic(name);
     var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(16, 0, 16, 0) };
     text.Children.Add(new TextBlock { Text = name, FontSize = 16, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap,
@@ -805,6 +975,107 @@ public static partial class DuaWidget {
     g.Children.Add(whenText);
     row.Child = g;
     return row;
+  }
+
+  // ---------------------------------------------------------------- "about the game" page (Steam store text, translated; the game's name stays as it is)
+  class AboutInfo { public string Short, About, Header, Genres, Devs, Release; }
+
+  static string HtmlToText(string html) {
+    if (string.IsNullOrEmpty(html)) return "";
+    string s = Regex.Replace(html, @"<\s*(br|/p|/li|/h\d|/div|/ul)[^>]*>", "\n", RegexOptions.IgnoreCase);
+    s = Regex.Replace(s, @"<\s*li[^>]*>", "• ", RegexOptions.IgnoreCase);
+    s = Regex.Replace(s, "<[^>]+>", "");
+    s = System.Net.WebUtility.HtmlDecode(s);
+    s = Regex.Replace(s, @"[ \t ]+", " ");
+    s = Regex.Replace(s, @" ?\n ?", "\n");
+    s = Regex.Replace(s, @"\n{3,}", "\n\n").Trim();
+    if (s.Length > 3500) { int cut = s.LastIndexOf('\n', 3500); s = s.Substring(0, cut > 1500 ? cut : 3500).Trim() + "\n…"; }
+    return s;
+  }
+
+  static string JsStr(Dictionary<string, object> d, string key) { object v; return d != null && d.TryGetValue(key, out v) && v != null ? v.ToString() : ""; }
+
+  // store.steampowered.com/api/appdetails (public, no sign-in); kept a week in covers\about
+  static AboutInfo FetchAbout(string appId) {
+    string folder = Path.Combine(Path.Combine(dir, "covers"), "about");
+    string file = Path.Combine(folder, appId + ".json");
+    string json = null;
+    if (File.Exists(file) && (DateTime.Now - File.GetLastWriteTime(file)).TotalDays < 7) json = File.ReadAllText(file, Encoding.UTF8);
+    if (json == null) {
+      System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12;
+      using (var wc = new System.Net.WebClient()) { wc.Encoding = Encoding.UTF8; json = wc.DownloadString("https://store.steampowered.com/api/appdetails?appids=" + appId + "&l=arabic"); }
+      try { Directory.CreateDirectory(folder); File.WriteAllText(file, json, new UTF8Encoding(false)); } catch { }
+    }
+    var root = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(json) as Dictionary<string, object>;
+    object app;
+    if (root == null || !root.TryGetValue(appId, out app)) return null;
+    var appD = app as Dictionary<string, object>;
+    object dataO;
+    if (appD == null || !appD.TryGetValue("data", out dataO)) return null;
+    var data = dataO as Dictionary<string, object>;
+    var info = new AboutInfo { Short = System.Net.WebUtility.HtmlDecode(JsStr(data, "short_description")).Trim(), About = HtmlToText(JsStr(data, "about_the_game")), Header = JsStr(data, "header_image") };
+    object o;
+    if (data.TryGetValue("genres", out o) && o is object[]) info.Genres = string.Join("، ", ((object[])o).Select(x => JsStr(x as Dictionary<string, object>, "description")).Where(x => x.Length > 0).ToArray());
+    if (data.TryGetValue("developers", out o) && o is object[]) info.Devs = string.Join("، ", ((object[])o).Select(x => x == null ? "" : x.ToString()).ToArray());
+    if (data.TryGetValue("release_date", out o)) info.Release = JsStr(o as Dictionary<string, object>, "date");
+    if (info.About == info.Short) info.About = "";
+    return info;
+  }
+
+  static void ShowAbout(Game g) {
+    if (libWin == null || libScroll == null || g.AppId == null) return;
+    libAchGame = null; libAchList = null;
+    libAboutGame = g;
+    libTitle.Text = g.Name;
+    libTitle.FlowDirection = HasArabic(g.Name) ? FlowDirection.RightToLeft : FlowDirection.LeftToRight;
+    libCount.Text = "📖 عن اللعبة";
+    libAddButton.Visibility = Visibility.Collapsed;
+    if (libHiddenButton != null) libHiddenButton.Visibility = Visibility.Collapsed;
+    libBackButton.Visibility = Visibility.Visible;
+    libHint.Text = "";
+    libScroll.Content = new TextBlock { Text = "جاري التحميل...", Foreground = new SolidColorBrush(Color.FromRgb(140, 140, 140)), FontSize = 17, Margin = new Thickness(34, 20, 34, 0) };
+    ApplyLibFilter();
+    var t = new System.Threading.Thread(delegate () {
+      AboutInfo info = null;
+      try { info = FetchAbout(g.AppId); } catch { }
+      Application.Current.Dispatcher.BeginInvoke(new Action(delegate { if (libAboutGame == g && libWin != null) RenderAbout(g, info); }));
+    });
+    t.IsBackground = true;
+    t.Start();
+  }
+
+  static TextBlock Para(string text, double size, Color color, Thickness margin) {
+    bool ar = HasArabic(text);
+    return new TextBlock { Text = text, FontSize = size, Foreground = new SolidColorBrush(color), TextWrapping = TextWrapping.Wrap, Margin = margin, LineHeight = size * 1.55,
+                           FlowDirection = ar ? FlowDirection.RightToLeft : FlowDirection.LeftToRight, TextAlignment = TextAlignment.Left };
+  }
+
+  static void RenderAbout(Game g, AboutInfo info) {
+    var page = new StackPanel { Margin = new Thickness(34, 0, 34, 20) };
+    if (info == null) {
+      page.Children.Add(Para("ما قدرت أجيب شرح اللعبة من ستيم. تأكد إن النت شغّال وجرّب مرة ثانية.", 17, Color.FromRgb(150, 150, 150), new Thickness(0, 20, 0, 0)));
+      libScroll.Content = page;
+      return;
+    }
+    if (!string.IsNullOrEmpty(info.Header)) {
+      try {
+        var img = new Image { Source = new BitmapImage(new Uri(info.Header)), Stretch = Stretch.Uniform, MaxHeight = 250, HorizontalAlignment = HorizontalAlignment.Left };
+        page.Children.Add(new Border { CornerRadius = new CornerRadius(12), ClipToBounds = true, FlowDirection = FlowDirection.LeftToRight, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 0, 0, 18), Child = img });
+      } catch { }
+    }
+    var facts = new List<string>();
+    if (!string.IsNullOrEmpty(info.Genres)) facts.Add("النوع: " + Tr(info.Genres));
+    if (!string.IsNullOrEmpty(info.Devs)) facts.Add("المطوّر: " + info.Devs);
+    if (!string.IsNullOrEmpty(info.Release)) facts.Add("نزلت: " + Digits(Tr(info.Release)));
+    if (facts.Count > 0) page.Children.Add(new TextBlock { Text = string.Join("   ·   ", facts.ToArray()), FontSize = 13.5, Foreground = new SolidColorBrush(Gold), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 14) });
+    if (!string.IsNullOrEmpty(info.Short)) page.Children.Add(Para(Tr(info.Short), 18, Color.FromRgb(240, 240, 240), new Thickness(0, 0, 0, 18)));
+    if (!string.IsNullOrEmpty(info.About)) page.Children.Add(Para(Tr(info.About), 15, Color.FromRgb(175, 175, 175), new Thickness(0)));
+    libScroll.Content = page;
+    libScroll.ScrollToTop();
+    var texts = new[] { info.Short, info.About, info.Genres, info.Release };
+    SetLangButton(texts.Any(x => !string.IsNullOrEmpty(x) && !HasArabic(x)));
+    if (TranslateThen("about:" + g.AppId, texts, delegate { if (libAboutGame == g && libWin != null) RenderAbout(g, info); }))
+      page.Children.Insert(0, new TextBlock { Text = "جاري التعريب...", FontSize = 13, Foreground = new SolidColorBrush(Color.FromRgb(130, 130, 130)), Margin = new Thickness(0, 0, 0, 10) });
   }
 
   // icons come from Steam's public image server (only the game id and the icon's file name are sent), kept in covers\ach

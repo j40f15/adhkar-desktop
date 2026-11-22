@@ -45,7 +45,7 @@ $Weather              = $true   # hourly Makkah weather from open-meteo.com (sen
 $DuaSeconds           = 30      # how often the dua on the desktop changes (adhkar-dua.exe); run -Mode Setup after changing
 $TaskWidget           = 'Adhkar - Dua Widget'
 $AppName              = 'حِصن'  # the program's name (notifications, right-click menu)
-$Version              = '2.4'   # shown in the settings / used by the auto-update
+$Version              = '2.5'   # shown in the settings / used by the auto-update
 
 # settings.ini (written by the settings window in adhkar-dua.exe) overrides the defaults above
 $Settings = @{}
@@ -726,7 +726,7 @@ public static class AdhkarRun {
   $widget = Join-Path $Root 'adhkar-dua.exe'
   Get-Process -Name 'adhkar-dua' -ErrorAction SilentlyContinue | Stop-Process -Force
   Start-Sleep -Milliseconds 500
-  Add-Type -AssemblyName System.Xaml, System.Windows.Forms, System.Drawing
+  Add-Type -AssemblyName System.Xaml, System.Windows.Forms, System.Drawing, System.Web.Extensions
   # an install updated by an older version may lack a newer source file: fetch it from the project's src folder
   $sources = 'dua-widget.cs', 'widget-ui.cs', 'widget-extras.cs', 'game-library.cs', 'hidio.cs', 'batteries.cs'
   foreach ($f in $sources) {
@@ -741,7 +741,7 @@ public static class AdhkarRun {
   $refs = @([System.Windows.Window].Assembly.Location, [System.Windows.Media.Brush].Assembly.Location,
             [System.Windows.DependencyObject].Assembly.Location, [System.Xaml.XamlReader].Assembly.Location,
             [System.Linq.Enumerable].Assembly.Location, [System.Windows.Forms.NotifyIcon].Assembly.Location,
-            [System.Drawing.Bitmap].Assembly.Location)
+            [System.Drawing.Bitmap].Assembly.Location, [System.Web.Script.Serialization.JavaScriptSerializer].Assembly.Location)
   Add-Type -Path @($sources | ForEach-Object { Join-Path $Root $_ }) -ReferencedAssemblies $refs -OutputAssembly $widget -OutputType WindowsApplication
   # the same exe is also the rest screen (Windows runs screensavers as <name>.scr /s)
   $rest = Join-Path $Root 'adhkar-rest.scr'
