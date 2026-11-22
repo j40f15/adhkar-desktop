@@ -54,18 +54,41 @@ public static partial class DuaWidget {
 
   static string CachedAr(string en) {
     if (string.IsNullOrEmpty(en)) return null;
+    string hand = CuratedAr(en);                                  // hand-made Arabic wins (translations-ar.cs)
+    if (hand != null) return hand;
     LoadTr();
     lock (trLock) { string ar; return trCache.TryGetValue(en, out ar) ? ar : null; }
   }
 
-  static bool NeedsTr(string t) { return !string.IsNullOrWhiteSpace(t) && !HasArabic(t) && CachedAr(t) == null; }
+  // dates, times, numbers and the like are not worth a request ("Unlocked Jul 27, 2026, 11:39 PM", "1.2.3", "5v5")
+  static readonly Regex NotWords = new Regex(@"^(unlocked\s+)?(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(,\s*\d{4})?(,?\s*@?\s*\d{1,2}:\d{2}\s*(am|pm)?)?$|^[\d\s\W_]+$|^v?\d+(\.\d+)+\w*$", RegexOptions.IgnoreCase);
+  static bool NeedsTr(string t) { return !string.IsNullOrWhiteSpace(t) && !HasArabic(t) && !NotWords.IsMatch(t.Trim()) && CachedAr(t) == null; }
 
   static string Tr(string t) {                                    // the Arabic text when we have it and it's wanted
     if (string.IsNullOrEmpty(t) || !Translating()) return t;
     return CachedAr(t) ?? t;
   }
 
+  // Google allows only so many requests: one at a time, a short gap between them, and a 10-minute pause after "too many".
+  static readonly object googleGate = new object();
+  static DateTime googleNext = DateTime.MinValue, googlePausedUntil = DateTime.MinValue;
+
   static string GoogleAr(string text) {
+    lock (googleGate) {
+      if (DateTime.Now < googlePausedUntil) throw new InvalidOperationException("translation paused");
+      var wait = googleNext - DateTime.Now;
+      if (wait > TimeSpan.Zero) System.Threading.Thread.Sleep(wait);
+      googleNext = DateTime.Now.AddMilliseconds(700);
+      try { return GoogleArNow(text); }
+      catch (System.Net.WebException e) {
+        var r = e.Response as System.Net.HttpWebResponse;
+        if (r != null && (int)r.StatusCode == 429) googlePausedUntil = DateTime.Now.AddMinutes(10);
+        throw;
+      }
+    }
+  }
+
+  static string GoogleArNow(string text) {
     System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12;
     using (var wc = new System.Net.WebClient()) {
       wc.Encoding = Encoding.UTF8;
@@ -187,7 +210,7 @@ public static partial class DuaWidget {
   }
 
   class Ach {
-    public string Name, Desc, Icon, IconGray, ApiName;
+    public string Name, Desc, Icon, IconGray, ApiName, NameEn, DescEn;   // Name/Desc: Arabic when the game has it; *En: English
     public bool Done, Hidden;
     public long Time;
     public double Percent = -1;                                   // % of all players who have it (Steam's public numbers), -1 unknown
@@ -247,7 +270,9 @@ public static partial class DuaWidget {
   static readonly Regex MissableRx = new Regex(
     @"\b(before (you )?(finish|complet|leav|reach|end|beat)|before (the )?(end|chapter|act|mission|level|final|boss|credits)|prior to|point of no return|missable|permanently" +
     @"|in (a|one|the same) (single )?(playthrough|run|save|campaign)|single playthrough|one playthrough" +
-    @"|(without|don't|do not|never) (kill|killing|harm|harming|alert|alerting|being (seen|detected|spotted))|\bspare\b|let \w+ (live|go|escape)|side with|chose to|choose to|decide to|refuse to)" +
+    @"|(without|don't|do not|never) (kill|killing|harm|harming|alert|alerting|being (seen|detected|spotted))|\bspare\b|let \w+ (live|go|escape)|side with|chose to|choose to|decide to|refuse to" +
+    @"|in (a|one) single (game|life|session|sitting)|using only|within \d+ (hours?|minutes?)|in (under|less than) \d+" +
+    @"|without (talking|using|upgrading|buying|purchasing|saving|reloading|healing|resting|taking (any )?damage|getting hit|being hit|dying|losing))" +
     @"|بدون (أن )?تقتل|دون (أن )?تقتل|قبل (أن )?(تنهي|نهاية|الفصل|المهمة)|في (لعبة|جولة|محاولة) واحدة",
     RegexOptions.IgnoreCase);
 
@@ -258,7 +283,7 @@ public static partial class DuaWidget {
     foreach (var a in list) {
       double p;
       a.Percent = a.ApiName != null && pc.TryGetValue(a.ApiName, out p) ? p : -1;
-      a.Missable = sp && !a.Done && MissableRx.IsMatch((a.Name ?? "") + " " + (a.Desc ?? ""));
+      a.Missable = sp && !a.Done && (MissableRx.IsMatch((a.NameEn ?? a.Name ?? "") + " " + (a.DescEn ?? a.Desc ?? "")) || MissableRx.IsMatch((a.Name ?? "") + " " + (a.Desc ?? "")));
     }
   }
 
@@ -315,6 +340,10 @@ public static partial class DuaWidget {
         var a = new Ach();
         if (disp != null) {
           a.Name = Localized(disp.Get("name"));
+          var nm = disp.Get("name");
+          a.NameEn = nm == null ? null : (nm.Kids == null ? Convert.ToString(nm.Value) : nm.Str("english"));
+          var ds = disp.Get("desc");
+          a.DescEn = ds == null ? null : (ds.Kids == null ? Convert.ToString(ds.Value) : ds.Str("english"));
           a.Desc = Localized(disp.Get("desc"));
           a.Icon = disp.Str("icon");
           a.IconGray = disp.Str("icon_gray");
@@ -1084,6 +1113,9 @@ public static partial class DuaWidget {
     text.Children.Add(new TextBlock { Text = name, FontSize = 16, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap,
                                       Foreground = new SolidColorBrush(a.Missable ? yellow : a.Done ? Color.FromRgb(240, 240, 240) : Color.FromRgb(160, 160, 160)),
                                       FlowDirection = ltr ? FlowDirection.LeftToRight : FlowDirection.RightToLeft, TextAlignment = ltr ? TextAlignment.Right : TextAlignment.Left });
+    if (!secret && name != a.Name && !string.IsNullOrEmpty(a.Name))   // the original name, small, under the Arabic one
+      text.Children.Add(new TextBlock { Text = a.Name, FontSize = 12, Foreground = new SolidColorBrush(Color.FromRgb(110, 110, 110)),
+                                        FlowDirection = FlowDirection.LeftToRight, TextAlignment = TextAlignment.Right, Margin = new Thickness(0, 1, 0, 0) });
     if (!string.IsNullOrEmpty(desc)) {
       bool dltr = !HasArabic(desc);
       text.Children.Add(new TextBlock { Text = desc, FontSize = 13.5, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 3, 0, 0),
