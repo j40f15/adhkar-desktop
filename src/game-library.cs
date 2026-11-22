@@ -23,6 +23,109 @@ public static partial class DuaWidget {
     public long LastPlayed;                                       // unix seconds
     public int SteamMinutes;                                      // Steam's own total play time
     public bool Hidden;
+    public string AppId;                                          // Steam only
+    public int AchDone, AchTotal;                                 // Steam achievements
+  }
+
+  // ---------------------------------------------------------------- Steam achievements (read from Steam's own files, no sign-in or key)
+  // appcache\stats\UserGameStatsSchema_<app>.bin = the list (names, descriptions, icons),
+  // appcache\stats\UserGameStats_<account>_<app>.bin = what you unlocked and when. Both are Steam's binary KeyValues.
+  class KV {
+    public string Name; public object Value; public List<KV> Kids;
+    public KV Get(string n) { if (Kids == null) return null; foreach (var k in Kids) if (string.Equals(k.Name, n, StringComparison.OrdinalIgnoreCase)) return k; return null; }
+    public string Str(string n) { var k = Get(n); return k == null || k.Value == null ? null : Convert.ToString(k.Value, CultureInfo.InvariantCulture); }
+  }
+
+  static string CStr(byte[] b, ref int p) {
+    int s = p;
+    while (p < b.Length && b[p] != 0) p++;
+    string r = Encoding.UTF8.GetString(b, s, p - s);
+    p++;
+    return r;
+  }
+
+  static List<KV> ReadBinKV(byte[] b, ref int p) {
+    var list = new List<KV>();
+    while (p < b.Length) {
+      byte t = b[p++];
+      if (t == 0x08 || t == 0x0B) break;                          // end of this section
+      var kv = new KV { Name = CStr(b, ref p) };
+      switch (t) {
+        case 0x00: kv.Kids = ReadBinKV(b, ref p); break;
+        case 0x01: kv.Value = CStr(b, ref p); break;
+        case 0x02: case 0x04: case 0x06: kv.Value = BitConverter.ToInt32(b, p); p += 4; break;
+        case 0x03: kv.Value = BitConverter.ToSingle(b, p); p += 4; break;
+        case 0x07: kv.Value = BitConverter.ToUInt64(b, p); p += 8; break;
+        case 0x0A: kv.Value = BitConverter.ToInt64(b, p); p += 8; break;
+        default: return list;                                     // unknown type: stop rather than misread
+      }
+      list.Add(kv);
+    }
+    return list;
+  }
+
+  class Ach { public string Name, Desc, Icon, IconGray; public bool Done, Hidden; public long Time; }
+
+  static string Localized(KV k) {                                 // Arabic when the game has it, else English
+    if (k == null) return "";
+    if (k.Kids == null) return k.Value == null ? "" : k.Value.ToString();
+    string s = k.Str("arabic");
+    if (string.IsNullOrEmpty(s)) s = k.Str("english");
+    if (string.IsNullOrEmpty(s)) foreach (var c in k.Kids) if (c.Value is string && c.Name != "token") { s = (string)c.Value; break; }
+    return s ?? "";
+  }
+
+  static List<Ach> ReadSteamAchievements(string appId) {
+    var res = new List<Ach>();
+    if (string.IsNullOrEmpty(appId)) return res;
+    string stats = Path.Combine(SteamRoot(), @"appcache\stats");
+    string schemaFile = Path.Combine(stats, "UserGameStatsSchema_" + appId + ".bin");
+    if (!File.Exists(schemaFile)) return res;
+    int p = 0;
+    var schemaTop = ReadBinKV(File.ReadAllBytes(schemaFile), ref p);
+    if (schemaTop.Count == 0 || schemaTop[0].Kids == null) return res;
+    var statsKv = schemaTop[0].Get("stats");
+    if (statsKv == null || statsKv.Kids == null) return res;
+
+    KV user = null;                                               // newest file = the signed-in Steam account
+    try {
+      var uf = new DirectoryInfo(stats).GetFiles("UserGameStats_*_" + appId + ".bin").OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault();
+      if (uf != null) { int q = 0; var top = ReadBinKV(File.ReadAllBytes(uf.FullName), ref q); if (top.Count > 0) user = top[0]; }
+    } catch { }
+
+    foreach (var stat in statsKv.Kids) {
+      var bits = stat.Get("bits");
+      if (bits == null || bits.Kids == null) continue;            // a plain number stat, not achievements
+      int data = 0;
+      KV times = null;
+      if (user != null) {
+        var us = user.Get(stat.Name);
+        if (us != null) {
+          var d = us.Get("data");
+          if (d != null && d.Value is int) data = (int)d.Value;
+          times = us.Get("AchievementTimes");
+        }
+      }
+      foreach (var bit in bits.Kids) {
+        int index;
+        string bs = bit.Str("bit");
+        if (bs == null || !int.TryParse(bs, out index)) if (!int.TryParse(bit.Name, out index)) continue;
+        var disp = bit.Get("display");
+        var a = new Ach();
+        if (disp != null) {
+          a.Name = Localized(disp.Get("name"));
+          a.Desc = Localized(disp.Get("desc"));
+          a.Icon = disp.Str("icon");
+          a.IconGray = disp.Str("icon_gray");
+          a.Hidden = disp.Str("hidden") == "1";
+        }
+        if (string.IsNullOrEmpty(a.Name)) a.Name = bit.Str("name") ?? "";
+        a.Done = index >= 0 && index < 32 && ((data >> index) & 1) == 1;
+        if (times != null) { var tk = times.Get(index.ToString()); if (tk != null && tk.Value is int) a.Time = (uint)(int)tk.Value; }
+        res.Add(a);
+      }
+    }
+    return res;
   }
 
   static List<Game> libGames = new List<Game>();
@@ -33,19 +136,112 @@ public static partial class DuaWidget {
   static WrapPanel libGrid;
   static TextBox libSearch;
   static TextBlock libCount, libEmpty;
-  static Border libHiddenButton;
+  static Border libHiddenButton, libAddButton, libBackButton;
+  static ScrollViewer libScroll;
+  static TextBlock libTitle, libHint;
+  static Game libAchGame;                                         // set while a game's achievements are shown
+  static StackPanel libAchList;
   static string shownLib;
   static Dictionary<string, int> libWeek = new Dictionary<string, int>();
 
-  // ---------------------------------------------------------------- hotkey
-  [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mods, uint vk);
-  const int LibHotkeyId = 0xB001;
+  // ---------------------------------------------------------------- hotkey (any key you choose in the settings)
+  // A keyboard hook on its own thread instead of RegisterHotKey: the key is only taken when the library opens.
+  // While a game or a coding app is in front the key goes to that app untouched.
+  delegate IntPtr LowLevelProc(int code, IntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll")] static extern IntPtr SetWindowsHookEx(int id, LowLevelProc proc, IntPtr hMod, uint thread);
+  [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr h, int code, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
+  [DllImport("user32.dll")] static extern int GetMessage(out MSG32 msg, IntPtr h, uint min, uint max);
+  [StructLayout(LayoutKind.Sequential)] struct MSG32 { public IntPtr hwnd; public uint message; public IntPtr wParam, lParam; public uint time; public int x, y; }
+  [StructLayout(LayoutKind.Sequential)] struct KBDLL { public uint vk, scan, flags, time; public IntPtr extra; }
+  static LowLevelProc hookProc;                                   // kept alive for the hook
+  static volatile int hkMods, hkVk;                               // mods: 1 Alt, 2 Ctrl, 4 Shift, 8 Win
+  static volatile bool hkRecording;                               // the settings window is reading a new shortcut
+  static volatile bool hkBlockGame = true, hkBlockCode = true;
+  static readonly string[] CodingApps = { "code", "code - insiders", "cursor", "windsurf", "zed", "devenv", "claude", "windowsterminal", "wt", "openconsole",
+    "powershell", "pwsh", "cmd", "idea64", "pycharm64", "rider64", "webstorm64", "clion64", "goland64", "phpstorm64", "studio64", "notepad++", "sublime_text",
+    "unity", "unity hub", "unrealeditor", "godot", "blender", "robloxstudiobeta" };
+
+  static void LoadHotkeySetting() {
+    hkMods = 3; hkVk = 0x47;                                      // Ctrl+Alt+G
+    string v = CfgStr("library_hotkey", "3,71");
+    string[] p = v.Split(',');
+    int m, k;
+    if (p.Length == 2 && int.TryParse(p[0], out m) && int.TryParse(p[1], out k)) { hkMods = m; hkVk = k; }
+    hkBlockGame = CfgBool("library_block_game", true);
+    hkBlockCode = CfgBool("library_block_coding", true);
+  }
+
+  static string HotkeyText(int mods, int vk) {
+    if (vk == 0) return "بدون اختصار";
+    var parts = new List<string>();
+    if ((mods & 2) != 0) parts.Add("Ctrl");
+    if ((mods & 1) != 0) parts.Add("Alt");
+    if ((mods & 4) != 0) parts.Add("Shift");
+    if ((mods & 8) != 0) parts.Add("Win");
+    string key = KeyInterop.KeyFromVirtualKey(vk).ToString();
+    if (key.Length == 2 && key[0] == 'D' && char.IsDigit(key[1])) key = key.Substring(1);
+    if (key.StartsWith("NumPad")) key = "Num " + key.Substring(6);
+    parts.Add(key);
+    return string.Join("+", parts.ToArray());
+  }
+
+  static int CurrentMods() {
+    int m = 0;
+    if (GetAsyncKeyState(0x12) < 0) m |= 1;
+    if (GetAsyncKeyState(0x11) < 0) m |= 2;
+    if (GetAsyncKeyState(0x10) < 0) m |= 4;
+    if (GetAsyncKeyState(0x5B) < 0 || GetAsyncKeyState(0x5C) < 0) m |= 8;
+    return m;
+  }
+
+  // false = leave the key to the app in front (a game, or a code editor / terminal)
+  static bool LibraryAllowed() {
+    try {
+      IntPtr fg = GetForegroundWindow();
+      uint pid = 0;
+      if (fg != IntPtr.Zero) GetWindowThreadProcessId(fg, out pid);
+      if (pid == (uint)Process.GetCurrentProcess().Id) return true;    // the library itself (toggle)
+      if (hkBlockGame && (InGame() || CurrentGame() != null)) return false;
+      if (hkBlockCode && pid != 0) {
+        string path = ProcessPath(pid);
+        if (path != null && CodingApps.Contains(Path.GetFileNameWithoutExtension(path).ToLowerInvariant())) return false;
+      }
+    } catch { }
+    return true;
+  }
+
+  static IntPtr HookProc(int code, IntPtr wParam, IntPtr lParam) {
+    if (code >= 0 && hkVk != 0 && !hkRecording) {
+      int msg = wParam.ToInt32();
+      if (msg == 0x0100 || msg == 0x0104) {                       // WM_KEYDOWN / WM_SYSKEYDOWN
+        var k = (KBDLL)Marshal.PtrToStructure(lParam, typeof(KBDLL));
+        if (k.vk == hkVk && CurrentMods() == hkMods && LibraryAllowed()) {
+          Application.Current.Dispatcher.BeginInvoke(new Action(ToggleLibrary));
+          return new IntPtr(1);                                   // used: the app in front doesn't get it
+        }
+      }
+    }
+    return CallNextHookEx(IntPtr.Zero, code, wParam, lParam);
+  }
 
   static void RegisterLibraryHotkey() {
-    libHotkey = RegisterHotKey(IntPtr.Zero, LibHotkeyId, 0x0001 | 0x0002 | 0x4000, 0x47);   // Ctrl+Alt+G, no auto-repeat
-    ComponentDispatcher.ThreadFilterMessage += delegate (ref MSG m, ref bool handled) {
-      if (m.message == 0x0312 && m.wParam.ToInt32() == LibHotkeyId) { handled = true; OpenLibrary(); }
-    };
+    LoadHotkeySetting();
+    var t = new System.Threading.Thread(delegate () {
+      hookProc = HookProc;
+      IntPtr h = SetWindowsHookEx(13, hookProc, GetModuleHandle(null), 0);   // WH_KEYBOARD_LL
+      libHotkey = h != IntPtr.Zero;
+      if (!libHotkey) return;
+      MSG32 m;
+      while (GetMessage(out m, IntPtr.Zero, 0, 0) > 0) { }
+    });
+    t.IsBackground = true;
+    t.Start();
+  }
+
+  static void ToggleLibrary() {
+    if (libWin != null && libWin.IsActive) CloseLibrary(); else OpenLibrary();
   }
 
   // ---------------------------------------------------------------- finding games
@@ -115,7 +311,8 @@ public static partial class DuaWidget {
       lock (steamDirs) { steamDirs.Clear(); foreach (var s in steam) if (s.InstallDir.Length > 0) steamDirs[s.InstallDir.ToLowerInvariant()] = s.Name; }
       foreach (var s in steam) {
         if (!s.Installed) continue;
-        var g = new Game { Key = "steam:" + s.AppId, Name = s.Name, Source = "Steam", LaunchUri = "steam://rungameid/" + s.AppId, LastPlayed = s.LastPlayed };
+        var g = new Game { Key = "steam:" + s.AppId, Name = s.Name, Source = "Steam", LaunchUri = "steam://rungameid/" + s.AppId, LastPlayed = s.LastPlayed, AppId = s.AppId };
+        try { var ach = ReadSteamAchievements(s.AppId); g.AchTotal = ach.Count; g.AchDone = ach.Count(a => a.Done); } catch { }
         if (s.Lib != null && s.InstallDir.Length > 0) g.Dir = Path.Combine(Path.Combine(s.Lib, @"steamapps\common"), s.InstallDir);
         long[] tm;
         if (times.TryGetValue(s.AppId, out tm)) { g.LastPlayed = Math.Max(g.LastPlayed, tm[0]); g.SteamMinutes = (int)tm[1]; }
@@ -215,7 +412,8 @@ public static partial class DuaWidget {
     // header: title + count on the right, search and buttons on the left
     var header = new DockPanel { Margin = new Thickness(32, 26, 26, 16), LastChildFill = false };
     var titles = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-    titles.Children.Add(new TextBlock { Text = "مكتبة الألعاب", FontSize = 29, FontWeight = FontWeights.SemiBold, Foreground = Brushes.White });
+    libTitle = new TextBlock { Text = "مكتبة الألعاب", FontSize = 29, FontWeight = FontWeights.SemiBold, Foreground = Brushes.White, MaxWidth = 520, TextTrimming = TextTrimming.CharacterEllipsis };
+    titles.Children.Add(libTitle);
     libCount = new TextBlock { FontSize = 15, Foreground = new SolidColorBrush(Color.FromRgb(140, 140, 140)), VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(16, 0, 0, 7) };
     titles.Children.Add(libCount);
     DockPanel.SetDock(titles, Dock.Left);
@@ -223,7 +421,7 @@ public static partial class DuaWidget {
 
     var tools = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
     var sbox = new Grid { Width = 280 };
-    var hint = new TextBlock { Text = "دوّر على لعبة...", Foreground = new SolidColorBrush(Color.FromRgb(120, 120, 120)), FontSize = 15, Margin = new Thickness(16, 0, 16, 0), VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false };
+    var hint = libHint = new TextBlock { Text = "دوّر على لعبة...", Foreground = new SolidColorBrush(Color.FromRgb(120, 120, 120)), FontSize = 15, Margin = new Thickness(16, 0, 16, 0), VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false };
     libSearch = new TextBox { Background = Brushes.Transparent, Foreground = Brushes.White, CaretBrush = Brushes.White, BorderThickness = new Thickness(0),
                               FontSize = 15, Padding = new Thickness(12, 9, 12, 9), VerticalContentAlignment = VerticalAlignment.Center };
     sbox.Children.Add(hint); sbox.Children.Add(libSearch);
@@ -232,7 +430,11 @@ public static partial class DuaWidget {
     libHiddenButton = PillButton("المخفية", delegate { libShowHidden = !libShowHidden; FillLibrary(); });
     libHiddenButton.Visibility = Visibility.Collapsed;
     tools.Children.Add(libHiddenButton);
-    tools.Children.Add(PillButton("+  أضف لعبة", AddGameByHand));
+    libAddButton = PillButton("+  أضف لعبة", AddGameByHand);
+    tools.Children.Add(libAddButton);
+    libBackButton = PillButton("→  رجوع للمكتبة", HideAchievements);
+    libBackButton.Visibility = Visibility.Collapsed;
+    tools.Children.Add(libBackButton);
     tools.Children.Add(PillButton("✕", CloseLibrary));
     DockPanel.SetDock(tools, Dock.Right);
     header.Children.Add(tools);
@@ -240,7 +442,17 @@ public static partial class DuaWidget {
 
     // covers
     libGrid = new WrapPanel { Margin = new Thickness(22, 0, 22, 10) };
-    var scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Content = libGrid, Focusable = false };
+    var scroll = libScroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Content = libGrid, Focusable = false };
+    try {                                                         // thin dark scrollbar instead of the default light one
+      var bar = (Style)System.Windows.Markup.XamlReader.Parse(
+        "<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml' TargetType='ScrollBar'>" +
+        "<Setter Property='Width' Value='8'/><Setter Property='MinWidth' Value='8'/><Setter Property='Margin' Value='0,0,6,0'/>" +
+        "<Setter Property='Template'><Setter.Value><ControlTemplate TargetType='ScrollBar'>" +
+        "<Track x:Name='PART_Track' IsDirectionReversed='True'><Track.Thumb><Thumb><Thumb.Template><ControlTemplate TargetType='Thumb'>" +
+        "<Border CornerRadius='4' Background='#40FFFFFF'/></ControlTemplate></Thumb.Template></Thumb></Track.Thumb></Track>" +
+        "</ControlTemplate></Setter.Value></Setter></Style>");
+      scroll.Resources.Add(typeof(System.Windows.Controls.Primitives.ScrollBar), bar);
+    } catch { scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Hidden; }
     libEmpty = new TextBlock { Foreground = new SolidColorBrush(Color.FromRgb(140, 140, 140)), FontSize = 17, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, TextAlignment = TextAlignment.Center, Visibility = Visibility.Collapsed };
     var body = new Grid();
     body.Children.Add(scroll); body.Children.Add(libEmpty);
@@ -248,22 +460,22 @@ public static partial class DuaWidget {
     grid.Children.Add(body);
 
     var foot = new TextBlock { FontSize = 12.5, Foreground = new SolidColorBrush(Color.FromRgb(105, 105, 105)), Margin = new Thickness(32, 6, 32, 16),
-      Text = (libHotkey ? "Ctrl+Alt+G يفتح المكتبة   ·   " : "") + "Enter يشغّل أول لعبة   ·   Esc يقفلها   ·   كلك يمين على اللعبة لخيارات أكثر" };
+      Text = (libHotkey && hkVk != 0 ? HotkeyText(hkMods, hkVk) + " يفتح المكتبة (تغيّره من الإعدادات)   ·   " : "") + "Enter يشغّل أول لعبة   ·   Esc يقفلها   ·   كلك يمين على اللعبة لخيارات أكثر" };
     Grid.SetRow(foot, 2);
     grid.Children.Add(foot);
 
     frame.Child = grid;
     w.Content = frame;
     w.PreviewKeyDown += (s, e) => {
-      if (e.Key == Key.Escape) { e.Handled = true; CloseLibrary(); }
-      else if (e.Key == Key.Enter) {
+      if (e.Key == Key.Escape) { e.Handled = true; if (libAchGame != null) HideAchievements(); else CloseLibrary(); }
+      else if (e.Key == Key.Enter && libAchGame == null) {
         e.Handled = true;
         var first = libGrid.Children.OfType<FrameworkElement>().FirstOrDefault(c => c.Visibility == Visibility.Visible);
         if (first != null) { LaunchGame((Game)first.Tag); CloseLibrary(); }
       }
     };
     w.Deactivated += delegate { if (!libDialogOpen) CloseLibrary(); };
-    w.Closed += delegate { libWin = null; libGrid = null; libSearch = null; libHiddenButton = null; shownLib = null; libShowHidden = false; };
+    w.Closed += delegate { libWin = null; libGrid = null; libSearch = null; libHiddenButton = null; shownLib = null; libShowHidden = false; libAchGame = null; libAchList = null; };
     w.Loaded += delegate {
       w.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(140)));
       libSearch.Focus();
@@ -329,10 +541,30 @@ public static partial class DuaWidget {
     return sb.ToString();
   }
 
+  static string TrophiesText(int n) {
+    if (n == 1) return "جائزة وحدة";
+    if (n == 2) return "جائزتين";
+    if (n >= 3 && n <= 10) return Digits(n.ToString()) + " جوائز";
+    return Digits(n.ToString()) + " جائزة";
+  }
+
   static void ApplyLibFilter() {
     if (libGrid == null) return;
     string q = libSearch == null ? "" : libSearch.Text.Trim();
     string q2 = FromArabicKeyboard(q);
+    if (libAchGame != null && libAchList != null) {               // achievements page: the search box filters achievements
+      int n = 0;
+      foreach (FrameworkElement r in libAchList.Children) {
+        var a = r.Tag as Ach;
+        if (a == null) continue;
+        string text = (a.Hidden && !a.Done ? "" : a.Name + " " + a.Desc);
+        bool ok = q.Length == 0 || text.IndexOf(q, StringComparison.CurrentCultureIgnoreCase) >= 0 || text.IndexOf(q2, StringComparison.CurrentCultureIgnoreCase) >= 0;
+        r.Visibility = ok ? Visibility.Visible : Visibility.Collapsed;
+        if (ok) n++;
+      }
+      if (libEmpty != null) { libEmpty.Text = "ما فيه جائزة بهالاسم"; libEmpty.Visibility = n == 0 ? Visibility.Visible : Visibility.Collapsed; }
+      return;
+    }
     int shown = 0;
     foreach (FrameworkElement c in libGrid.Children) {
       var g = (Game)c.Tag;
@@ -341,7 +573,9 @@ public static partial class DuaWidget {
       if (ok) shown++;
     }
     int total = libGames.Count(g => !g.Hidden), hiddenCount = libGames.Count(g => g.Hidden);
-    if (libCount != null) libCount.Text = libShowHidden ? "المخفية: " + GamesText(hiddenCount) : (libLoading && libGames.Count == 0 ? "جاري البحث عن ألعابك..." : (total == 0 ? "" : GamesText(total)));
+    int trophies = libGames.Where(g => !g.Hidden).Sum(g => g.AchDone);
+    if (libCount != null) libCount.Text = libShowHidden ? "المخفية: " + GamesText(hiddenCount)
+      : (libLoading && libGames.Count == 0 ? "جاري البحث عن ألعابك..." : (total == 0 ? "" : GamesText(total) + (trophies > 0 ? "   ·   🏆 " + TrophiesText(trophies) : "")));
     if (libHiddenButton != null) {
       libHiddenButton.Visibility = hiddenCount > 0 || libShowHidden ? Visibility.Visible : Visibility.Collapsed;
       ((TextBlock)libHiddenButton.Child).Text = libShowHidden ? "رجوع للمكتبة" : "المخفية (" + Digits(hiddenCount.ToString()) + ")";
@@ -411,6 +645,14 @@ public static partial class DuaWidget {
                             Background = new LinearGradientBrush(Color.FromArgb(0, 0, 0, 0), Color.FromArgb(225, 0, 0, 0), 90) };
     play.Child = new TextBlock { Text = "▶  العب", FlowDirection = FlowDirection.RightToLeft, Foreground = Brushes.White, FontSize = 17, FontWeight = FontWeights.SemiBold, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 0, 13) };
     inner.Children.Add(play);
+    if (g.AchTotal > 0) {                                         // trophies badge: opens the achievements, not the game
+      var badge = new Border { HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(8), Padding = new Thickness(8, 3, 8, 4),
+                               CornerRadius = new CornerRadius(8), Background = new SolidColorBrush(Color.FromArgb(200, 0, 0, 0)), Cursor = Cursors.Hand, ToolTip = "الجوائز",
+                               Child = new TextBlock { Text = "🏆 " + Digits(g.AchDone + "/" + g.AchTotal), Foreground = new SolidColorBrush(g.AchDone == g.AchTotal ? Gold : Color.FromRgb(235, 235, 235)), FontSize = 12.5, FontWeight = FontWeights.SemiBold } };
+      badge.MouseLeftButtonDown += (s, e) => { e.Handled = true; };
+      badge.MouseLeftButtonUp += (s, e) => { e.Handled = true; ShowAchievements(g); };
+      inner.Children.Add(badge);
+    }
     cover.Child = inner;
     var zoom = new ScaleTransform(1, 1);
     cover.RenderTransformOrigin = new Point(0.5, 0.5);
@@ -442,6 +684,7 @@ public static partial class DuaWidget {
 
     var menu = new ContextMenu { FlowDirection = FlowDirection.RightToLeft };
     AddMenuItem(menu, "▶  شغّل", delegate { LaunchGame(g); CloseLibrary(); });
+    if (g.AchTotal > 0) AddMenuItem(menu, "🏆  الجوائز", delegate { ShowAchievements(g); });
     if (!string.IsNullOrEmpty(g.Dir) && Directory.Exists(g.Dir))
       AddMenuItem(menu, "افتح مجلد اللعبة", delegate { try { Process.Start("explorer.exe", "\"" + g.Dir + "\""); } catch { } CloseLibrary(); });
     AddMenuItem(menu, "غيّر الصورة...", delegate { ChangeCover(g); });
@@ -465,6 +708,124 @@ public static partial class DuaWidget {
       if (g.LaunchUri != null) Process.Start(new ProcessStartInfo(g.LaunchUri) { UseShellExecute = true });
       else if (g.Exe != null) Process.Start(new ProcessStartInfo(g.Exe) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(g.Exe) });
     } catch { }
+  }
+
+  // ---------------------------------------------------------------- achievements page (inside the library window)
+  static void ShowAchievements(Game g) {
+    if (libWin == null || libScroll == null) return;
+    List<Ach> list;
+    try { list = ReadSteamAchievements(g.AppId); } catch { list = new List<Ach>(); }
+    if (list.Count == 0) return;
+    libAchGame = g;
+    int done = list.Count(a => a.Done);
+    double pct = 100.0 * done / list.Count;
+
+    var page = new StackPanel { Margin = new Thickness(34, 0, 34, 16) };
+    var sum = new TextBlock { FontSize = 17, Foreground = Brushes.White, Margin = new Thickness(0, 0, 0, 10),
+                              Text = "حصلت " + Digits(done.ToString()) + " من " + Digits(list.Count.ToString()) + " جائزة   ·   " + Digits(((int)Math.Round(pct)).ToString()) + "٪" };
+    page.Children.Add(sum);
+    var bar = new Grid { Height = 8, Margin = new Thickness(0, 0, 0, 22), FlowDirection = FlowDirection.RightToLeft };
+    bar.Children.Add(new Border { CornerRadius = new CornerRadius(4), Background = new SolidColorBrush(Color.FromArgb(30, 255, 255, 255)) });
+    var fill = new Border { CornerRadius = new CornerRadius(4), Background = new SolidColorBrush(Gold), HorizontalAlignment = HorizontalAlignment.Left };
+    bar.Children.Add(fill);
+    bar.SizeChanged += delegate { fill.Width = bar.ActualWidth * pct / 100.0; };
+    page.Children.Add(bar);
+
+    libAchList = new StackPanel();
+    // unlocked first (newest first), then the ones still to get
+    foreach (var a in list.Where(x => x.Done).OrderByDescending(x => x.Time).Concat(list.Where(x => !x.Done))) libAchList.Children.Add(AchRow(g.AppId, a));
+    page.Children.Add(libAchList);
+
+    libScroll.Content = page;
+    libScroll.ScrollToTop();
+    libTitle.Text = g.Name;
+    libTitle.FlowDirection = HasArabic(g.Name) ? FlowDirection.RightToLeft : FlowDirection.LeftToRight;
+    libCount.Text = "🏆 الجوائز";
+    libAddButton.Visibility = Visibility.Collapsed;
+    if (libHiddenButton != null) libHiddenButton.Visibility = Visibility.Collapsed;
+    libBackButton.Visibility = Visibility.Visible;
+    libHint.Text = "دوّر على جائزة...";
+    libSearch.Text = "";
+    libSearch.Focus();
+    ApplyLibFilter();
+  }
+
+  static void HideAchievements() {
+    if (libWin == null) return;
+    libAchGame = null; libAchList = null;
+    libScroll.Content = libGrid;
+    libTitle.Text = "مكتبة الألعاب";
+    libTitle.FlowDirection = FlowDirection.RightToLeft;
+    libAddButton.Visibility = Visibility.Visible;
+    libBackButton.Visibility = Visibility.Collapsed;
+    libHint.Text = "دوّر على لعبة...";
+    libSearch.Text = "";
+    libSearch.Focus();
+    ApplyLibFilter();
+  }
+
+  static FrameworkElement AchRow(string appId, Ach a) {
+    bool secret = a.Hidden && !a.Done;
+    var row = new Border { Tag = a, CornerRadius = new CornerRadius(12), Padding = new Thickness(14, 12, 14, 12), Margin = new Thickness(0, 0, 0, 8),
+                           Background = new SolidColorBrush(a.Done ? Color.FromArgb(22, 255, 255, 255) : Color.FromArgb(10, 255, 255, 255)) };
+    var g = new Grid();
+    g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(64) });
+    g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+    g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+    var iconBox = new Border { Width = 64, Height = 64, CornerRadius = new CornerRadius(8), Background = new SolidColorBrush(Color.FromArgb(30, 255, 255, 255)), FlowDirection = FlowDirection.LeftToRight };
+    var img = new Image { Width = 64, Height = 64, Stretch = Stretch.UniformToFill, Opacity = a.Done ? 1 : 0.55 };
+    iconBox.Child = img;
+    SetAchIcon(img, appId, a.Done ? a.Icon : (a.IconGray ?? a.Icon));
+    g.Children.Add(iconBox);
+
+    string name = secret ? "جائزة مخفية" : a.Name;
+    string desc = secret ? "تنكشف لما تحصلها" : a.Desc;
+    bool ltr = !HasArabic(name);
+    var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(16, 0, 16, 0) };
+    text.Children.Add(new TextBlock { Text = name, FontSize = 16, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap,
+                                      Foreground = new SolidColorBrush(a.Done ? Color.FromRgb(240, 240, 240) : Color.FromRgb(160, 160, 160)),
+                                      FlowDirection = ltr ? FlowDirection.LeftToRight : FlowDirection.RightToLeft, TextAlignment = ltr ? TextAlignment.Right : TextAlignment.Left });
+    if (!string.IsNullOrEmpty(desc)) {
+      bool dltr = !HasArabic(desc);
+      text.Children.Add(new TextBlock { Text = desc, FontSize = 13.5, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 3, 0, 0),
+                                        Foreground = new SolidColorBrush(Color.FromRgb(135, 135, 135)),
+                                        FlowDirection = dltr ? FlowDirection.LeftToRight : FlowDirection.RightToLeft, TextAlignment = dltr ? TextAlignment.Right : TextAlignment.Left });
+    }
+    Grid.SetColumn(text, 1);
+    g.Children.Add(text);
+
+    string when = "ما حصلتها للحين";
+    if (a.Done) {
+      when = "✔ حصلتها";
+      if (a.Time > 0) { DateTime t = UnixEpoch.AddSeconds(a.Time).ToLocalTime(); when = "✔ " + Digits(t.Day.ToString()) + " " + Months[t.Month - 1] + " " + Digits(t.Year.ToString()); }
+    }
+    var whenText = new TextBlock { Text = when, FontSize = 13, VerticalAlignment = VerticalAlignment.Center,
+                                   Foreground = new SolidColorBrush(a.Done ? Gold : Color.FromRgb(110, 110, 110)) };
+    Grid.SetColumn(whenText, 2);
+    g.Children.Add(whenText);
+    row.Child = g;
+    return row;
+  }
+
+  // icons come from Steam's public image server (only the game id and the icon's file name are sent), kept in covers\ach
+  static void SetAchIcon(Image img, string appId, string icon) {
+    if (string.IsNullOrEmpty(icon)) return;
+    icon = Path.GetFileName(icon);
+    if (icon.IndexOf('.') < 0) icon += ".jpg";
+    string folder = Path.Combine(Path.Combine(Path.Combine(dir, "covers"), "ach"), appId);
+    string file = Path.Combine(folder, icon);
+    if (File.Exists(file)) { img.Source = LoadPicture(file, 128); return; }
+    string url = "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/" + appId + "/" + icon;
+    System.Threading.ThreadPool.QueueUserWorkItem(delegate {
+      try {
+        Directory.CreateDirectory(folder);
+        string part = file + "." + System.Threading.Thread.CurrentThread.ManagedThreadId + ".part";
+        System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12;
+        using (var wc = new System.Net.WebClient()) wc.DownloadFile(url, part);
+        if (!File.Exists(file)) File.Move(part, file); else File.Delete(part);
+      } catch { return; }
+      Application.Current.Dispatcher.BeginInvoke(new Action(delegate { img.Source = LoadPicture(file, 128); }));
+    });
   }
 
   // ---------------------------------------------------------------- editing the library

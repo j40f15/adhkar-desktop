@@ -10,6 +10,7 @@ using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
@@ -313,6 +314,43 @@ public static partial class DuaWidget {
     var overlay = Check("تنبيه فوق اللعبة (وقت الصلاة، الشحن، الحرارة)", CfgBool("game_overlay", true));
     root.Children.Add(overlay);
 
+    // library shortcut: click the box, then press the keys you want (Esc = cancel, Backspace = no shortcut)
+    int newMods = hkMods, newVk = hkVk;
+    var keyText = new TextBlock { Text = HotkeyText(newMods, newVk), Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center, FlowDirection = FlowDirection.LeftToRight };
+    var keyBox = new Border { Width = 190, Padding = new Thickness(8, 6, 8, 6), CornerRadius = new CornerRadius(6), Cursor = Cursors.Hand,
+                              Background = new SolidColorBrush(Color.FromRgb(40, 40, 40)), BorderBrush = new SolidColorBrush(Color.FromRgb(70, 70, 70)), BorderThickness = new Thickness(1), Child = keyText };
+    keyBox.MouseLeftButtonUp += delegate {
+      hkRecording = true;
+      keyText.Text = "اضغط الزر اللي تبيه...";
+      keyBox.BorderBrush = new SolidColorBrush(Gold);
+    };
+    root.Children.Add(Row("اختصار مكتبة الألعاب", keyBox));
+    var blockGame = Check("لا ضغطته وأنا ألعب، يروح الزر للعبة وما تفتح المكتبة", CfgBool("library_block_game", true));
+    var blockCode = Check("لا ضغطته وأنا أبرمج (VS Code وغيره)، ما تفتح المكتبة", CfgBool("library_block_coding", true));
+    root.Children.Add(blockGame); root.Children.Add(blockCode);
+    w.PreviewKeyDown += (s, e) => {
+      if (!hkRecording) return;
+      e.Handled = true;
+      Key key = e.Key == Key.System ? e.SystemKey : e.Key;
+      if (key == Key.LeftCtrl || key == Key.RightCtrl || key == Key.LeftAlt || key == Key.RightAlt || key == Key.LeftShift || key == Key.RightShift || key == Key.LWin || key == Key.RWin) return;
+      if (key == Key.Escape) { hkRecording = false; keyText.Text = HotkeyText(newMods, newVk); keyBox.BorderBrush = new SolidColorBrush(Color.FromRgb(70, 70, 70)); return; }
+      int mods = 0;
+      if ((Keyboard.Modifiers & ModifierKeys.Alt) != 0) mods |= 1;
+      if ((Keyboard.Modifiers & ModifierKeys.Control) != 0) mods |= 2;
+      if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0) mods |= 4;
+      if ((Keyboard.Modifiers & ModifierKeys.Windows) != 0) mods |= 8;
+      int vk = KeyInterop.VirtualKeyFromKey(key);
+      if ((key == Key.Back || key == Key.Delete) && mods == 0) { newMods = 0; newVk = 0; }
+      else {
+        bool plain = (key >= Key.A && key <= Key.Z) || (key >= Key.D0 && key <= Key.D9) || key == Key.Space || key == Key.Enter || key == Key.Tab;
+        if (plain && (mods & 3) == 0) { keyText.Text = "هذا الزر لازم معه Ctrl أو Alt"; return; }   // or it would eat normal typing
+        newMods = mods; newVk = vk;
+      }
+      hkRecording = false;
+      keyText.Text = HotkeyText(newMods, newVk);
+      keyBox.BorderBrush = new SolidColorBrush(Color.FromRgb(70, 70, 70));
+    };
+
     // batteries
     root.Children.Add(Heading("شحن الأجهزة"));
     int[] lowVals = { 10, 15, 20, 30 };
@@ -344,6 +382,9 @@ public static partial class DuaWidget {
       foreach (var r in themeRadios) if (r.IsChecked == true) SetCfg("theme", (string)r.Tag);
       SetCfg("second_screen", second.IsChecked == true);
       SetCfg("game_overlay", overlay.IsChecked == true);
+      SetCfg("library_hotkey", newMods + "," + newVk);
+      SetCfg("library_block_game", blockGame.IsChecked == true);
+      SetCfg("library_block_coding", blockCode.IsChecked == true);
       SetCfg("rest_minutes", restVals[Math.Max(0, rest.SelectedIndex)]);
       SetCfg("battery_low", lowVals[Math.Max(0, low.SelectedIndex)]);
       SetCfg("battery_full_alert", full.IsChecked == true);
@@ -359,7 +400,7 @@ public static partial class DuaWidget {
       t.Tick += delegate { t.Stop(); Restart(); };             // and the widget restarts with the new look
       t.Start();
     };
-    w.Closed += delegate { settingsWin = null; };
+    w.Closed += delegate { settingsWin = null; hkRecording = false; };
     settingsWin = w;
     w.Show();
     w.Activate();
